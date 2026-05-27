@@ -55,21 +55,19 @@ def get_user(req):
     return token, users[token]
 
 def make_cipher_data():
-    data = {
-        "iv":           list(os.urandom(16)),
-        "aes_key":      list(os.urandom(32)),
-        "hmac_key":     list(os.urandom(32)),
-        "conn_suffix":  list(os.urandom(32)),
-        "conn_message": list(os.urandom(32)),
-        "resp_message": list(os.urandom(32)),
+    return {
+        "iv":           [0] * 16,
+        "aes_key":      [0] * 32,
+        "hmac_key":     [0] * 32,
+        "conn_suffix":  [0] * 32,
+        "conn_message": [0] * 32,
+        "resp_message": [0] * 32,
     }
-    print(f"   [CIPHER] iv={len(data['iv'])} aes={len(data['aes_key'])} hmac={len(data['hmac_key'])} suffix={len(data['conn_suffix'])} conn={len(data['conn_message'])} resp={len(data['resp_message'])}")
-    return data
 
 def make_isn():
     return {
-        "srv_seq": secrets.randbits(32),
-        "cli_seq": secrets.randbits(32),
+        "srv_seq": 0,
+        "cli_seq": 0,
     }
 
 def build_game_session_info(game_id):
