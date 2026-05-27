@@ -115,25 +115,41 @@ def bool_val(v, default=False):
     return str(v).lower() == "true"
 
 # ---------------- USER ----------------
+def register_token(token: str, platform="unknown", name="player", version="", client_version=""):
+    """Register a token->session mapping, creating a session if needed."""
+    if token not in tokens:
+        session_id = str(uuid.uuid4())
+        users[session_id] = {
+            "created":        time.time(),
+            "platform":       platform,
+            "name":           name,
+            "version":        version,
+            "client_version": client_version,
+        }
+        tokens[token] = session_id
+    return tokens[token]
+
 @app.post("/user")
 async def create_user(request: Request):
     req = await parse_body(request)
-    session_id = str(uuid.uuid4())
+    # If the client sends a token reuse it, otherwise mint a new one
     token = str(uuid.uuid4())
-    users[session_id] = {
-        "created":        time.time(),
-        "platform":       req.get("platform", "unknown"),
-        "name":           req.get("name") or req.get("username") or "player",
-        "version":        req.get("version", ""),
-        "client_version": req.get("client_version", ""),
-    }
-    tokens[token] = session_id
+    session_id = register_token(
+        token,
+        platform=req.get("platform", "unknown"),
+        name=req.get("name") or req.get("username") or "player",
+        version=req.get("version", ""),
+        client_version=req.get("client_version", ""),
+    )
     return resp({"session_id": session_id, "mgi_token": token})
 
 @app.get("/auth")
 async def auth(mgi_bearer_token: str = Header(None)):
-    if not mgi_bearer_token or mgi_bearer_token not in tokens:
+    if not mgi_bearer_token:
         return resp({"error": "invalid token"}, 403)
+    # Auto-register stale tokens from before a server restart so the game
+    # doesn't get stuck in a 403 loop on first load
+    register_token(mgi_bearer_token)
     return resp({"status": "ok"})
 
 @app.get("/user/{user_id}")
