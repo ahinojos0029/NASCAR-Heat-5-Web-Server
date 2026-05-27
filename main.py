@@ -147,16 +147,8 @@ async def create_user(request: Request):
 async def auth(mgi_bearer_token: str = Header(None)):
     if not mgi_bearer_token:
         return resp({"error": "invalid token"}, 403)
-    # Auto-register stale tokens from before a server restart
     session_id = register_token(mgi_bearer_token)
-    u = users.get(session_id, {})
-    return resp({
-        "status":     "ok",
-        "session_id": session_id,
-        "mgi_token":  mgi_bearer_token,
-        "name":       u.get("name", "player"),
-        "platform":   u.get("platform", "unknown"),
-    })
+    return resp({"session_id": session_id, "mgi_token": mgi_bearer_token})
 
 @app.get("/user/{user_id}")
 async def get_user(user_id: str):
