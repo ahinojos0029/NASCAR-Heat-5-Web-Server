@@ -11,13 +11,25 @@ app = FastAPI()
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     print(f"\n----- {request.method} {request.url.path} -----")
-    # Read and log the body, then put it back so the route handler can still read it
     body_bytes = await request.body()
     if body_bytes:
         print("Body:", body_bytes.decode(errors="replace"))
     response = await call_next(request)
     print("Response Status:", response.status_code)
-    return response
+
+    # Unity 2017 WWW class cannot handle chunked transfer encoding.
+    # Buffer the full response body and set Content-Length so uvicorn
+    # sends a plain HTTP/1.0-style response instead of chunked.
+    body = b""
+    async for chunk in response.body_iterator:
+        if isinstance(chunk, str):
+            chunk = chunk.encode()
+        body += chunk
+    return JSONResponse(
+        content=json.loads(body),
+        status_code=response.status_code,
+        headers={"Content-Length": str(len(body))},
+    )
 
 # ---------------- DATA ----------------
 users = {}       # session_id -> user data
