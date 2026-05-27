@@ -2,6 +2,19 @@ from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse
 from starlette.responses import Response
 
+def raw_json(data, status=200):
+    body = json.dumps(data, separators=(",", ":")).encode("utf-8")
+
+    return Response(
+        content=body,
+        status_code=status,
+        headers={
+            "Content-Type": "application/json",
+            "Content-Length": str(len(body)),
+            "Connection": "close",
+        },
+    )
+
 import uuid
 import time
 import socket
