@@ -143,12 +143,20 @@ async def create_user(request: Request):
     )
     return resp({"session_id": session_id, "mgi_token": token})
 
+PLACEHOLDER_TOKENS = {"invalid", "none", "null", "", "undefined"}
+
+def is_placeholder(token):
+    return not token or token.lower() in PLACEHOLDER_TOKENS
+
 @app.get("/auth")
 async def auth(mgi_bearer_token: str = Header(None)):
-    if not mgi_bearer_token:
-        return resp({"error": "invalid token"}, 403)
-    session_id = register_token(mgi_bearer_token)
-    return resp({"session_id": session_id, "mgi_token": mgi_bearer_token})
+    # Game sends "invalid" when it has no token yet — mint a fresh one
+    if is_placeholder(mgi_bearer_token):
+        token = str(uuid.uuid4())
+    else:
+        token = mgi_bearer_token
+    session_id = register_token(token)
+    return resp({"session_id": session_id, "mgi_token": token})
 
 @app.get("/user/{user_id}")
 async def get_user(user_id: str):
