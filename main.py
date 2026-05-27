@@ -2,6 +2,7 @@ from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse
 import uuid
 import time
+import socket
 
 app = FastAPI()
 
@@ -17,18 +18,33 @@ async def log_requests(request: Request, call_next):
     return response
 
 # ---------------- DATA ----------------
-users = {}
-tokens = {}
-games = {}
+users = {}    # session_id -> user data
+tokens = {}   # mgi_token -> session_id
+games = {}    # game_id -> game data
+
 leaderboards = {}
 
 # ---------------- HELPERS ----------------
+def get_local_ip():
+    """Get the LAN IP so game clients can actually connect."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
+LOCAL_IP = get_local_ip()
+print(f"[SERVER] Local IP for backend responses: {LOCAL_IP}")
+
 def response(data, code=200):
-    print(f"Returning JSON (status {code}):")
     import json
-    print(json.dumps(data, indent=2))  # <-- add this
-    r = JSONResponse(content=data)
-    r.headers["ACTUAL-STATUS-CODE"] = str(code)
+    print(f"Returning JSON (status {code}):")
+    print(json.dumps(data, indent=2))
+    # Use status_code on JSONResponse so the game actually sees 4xx errors
+    r = JSONResponse(content=data, status_code=code)
     return r
 
 def generate_backend(session_index=0):
@@ -37,16 +53,21 @@ def generate_backend(session_index=0):
         "mpidx": session_index,
         "cipher": {"key": "localdevkey", "iv": "localiv"},
         "isn": {"send": 1, "recv": 1},
-        "ip": "0.0.0.0"
+        "ip": LOCAL_IP   # must be reachable by the client, not 0.0.0.0
     }
-def build_game_response(gid, g):
-    """Build a full game response including backend data"""
-    if g["players"]:
-        g["master_user_id"] = g.get("master_user_id") or g["players"][0]
-        g["master_name"] = g.get("master_name") or "player"
-        g["master_is_verified"] = g.get("master_is_verified", True)
 
-    session_index = 0  # Default session index for backend
+def build_game_response(gid, g, viewer_session=None):
+    """
+    Build a full game response.
+    viewer_session: if provided, use that player's mpidx for the backend object
+    (matters for add_user responses; for list_games it's fine as 0)
+    """
+    players = g.get("players", [])
+    if viewer_session and viewer_session in players:
+        session_index = players.index(viewer_session)
+    else:
+        session_index = 0
+
     return {
         "id": gid,
         "s": {
@@ -64,14 +85,14 @@ def build_game_response(gid, g):
             "purpose": g["purpose"],
             "livedata_interval": g["livedata_interval"],
             "is_pro_mode": g["is_pro_mode"],
-            "min_users_for_scoring": g["min_users_for_scoring"]
+            "min_users_for_scoring": g["min_users_for_scoring"],
         },
         "c": {
             "is_private": g["is_private"],
             "force_sim_physics": g["force_sim_physics"],
-            "allow_custom_setups": g["allow_custom_setups"]
+            "allow_custom_setups": g["allow_custom_setups"],
         },
-        "race_length": g["laps"],
+        "race_length": g["race_length"],
         "num_laps": g["num_laps"],
         "wear_factor": g["wear_factor"],
         "flags": g["flags"],
@@ -86,7 +107,7 @@ def build_game_response(gid, g):
         "friendly_track_name": g["friendly_track_name"],
         "game_year": g["game_year"],
         "draft_influence": g["draft_influence"],
-        "backend": generate_backend(session_index)
+        "backend": generate_backend(session_index),
     }
 
 # ---------------- USER ----------------
@@ -94,7 +115,14 @@ def build_game_response(gid, g):
 async def create_user(req: dict):
     session_id = str(uuid.uuid4())
     token = str(uuid.uuid4())
-    users[session_id] = {"created": time.time()}
+    # Store whatever name/platform the client sends
+    users[session_id] = {
+        "created": time.time(),
+        "platform": req.get("platform", "unknown"),
+        "name": req.get("name") or req.get("username") or "player",
+        "version": req.get("version", ""),
+        "client_version": req.get("client_version", ""),
+    }
     tokens[token] = session_id
     return response({"session_id": session_id, "mgi_token": token})
 
@@ -108,7 +136,8 @@ async def auth(mgi_bearer_token: str = Header(None)):
 async def get_user(user_id: str):
     if user_id not in users:
         return response({"error": "user not found"}, 404)
-    return response({"id": user_id})
+    u = users[user_id]
+    return response({"id": user_id, "name": u.get("name", "player")})
 
 @app.post("/user/config")
 async def user_config(req: dict):
@@ -121,62 +150,94 @@ async def create_game(req: dict = {}, mgi_bearer_token: str = Header(None)):
         return response({"error": "invalid token"}, 403)
 
     session = tokens[mgi_bearer_token]
+    user = users.get(session, {})
+    cfg = req.get("config", {})
+    backend_cfg = req.get("backend", {})
+
     game_id = str(uuid.uuid4())
+
+    # Pull values from the client request; fall back to sane defaults only
+    # when the field is genuinely absent
+    def bool_cfg(key, default=False):
+        v = cfg.get(key)
+        if v is None:
+            return default
+        if isinstance(v, bool):
+            return v
+        return str(v).lower() == "true"
+
     g = {
         "players": [session],
-        "max_players": req.get("backend", {}).get("capacity", 20),
+        "max_players": backend_cfg.get("capacity", 20),
         "state": 0,
         "friendly_state": "LOBBY",
         "round_id": str(uuid.uuid4()),
         "state_timeout": 0,
-        "track": "SomeTrack",
-        "track_name": "Some Track",
-        "series": req.get("config", {}).get("league", "CUP"),
-        "laps": 50,
-        "num_laps": 50,
-        "wear_factor": 1.0,
-        "flags": [],
-        "event_id": "event123",
-        "event_set_id": req.get("config", {}).get("event_set_id", ""),
-        "session_type": req.get("config", {}).get("session_type", "NORMAL"),
+        # Track/event info comes from the client; we store what they send
+        "race_length": cfg.get("race_length", 10),
+        "num_laps": cfg.get("num_laps") or cfg.get("race_length") or 10,
+        "wear_factor": float(cfg.get("wear_factor", 1.0)),
+        "flags": cfg.get("flags", []),
+        "event_id": cfg.get("event_id", ""),
+        "event_set_id": cfg.get("event_set_id", ""),
+        "session_type": cfg.get("session_type", "NORMAL"),
         "platform_session_id": str(uuid.uuid4()),
         "platform_correlation_id": str(uuid.uuid4()),
-        "driving_backwards_rule": False,
-        "is_private": req.get("config", {}).get("c.is_private", "false") == "true",
-        "force_sim_physics": req.get("config", {}).get("c.force_sim_physics", "false") == "true",
-        "allow_custom_setups": req.get("config", {}).get("c.allow_custom_setups", "false") == "true",
-        "damage": "FULL",
-        "league": req.get("config", {}).get("league", "CUP"),
-        "stage_cfg": [],
-        "enable_chat": req.get("config", {}).get("enable_chat", "false") == "true",
-        "enable_ai": req.get("config", {}).get("enable_ai", "false") == "true",
-        "trnclass": "N2020",
-        "friendly_track_name": "Some Track",
-        "game_year": req.get("config", {}).get("game_year", "PRESENT"),
-        "purpose": "RACE",
-        "livedata_interval": 1000,
-        "is_pro_mode": False,
-        "draft_influence": 1.0,
-        "min_users_for_scoring": 1,
+        "driving_backwards_rule": bool_cfg("driving_backwards_rule", False),
+        "is_private": bool_cfg("c.is_private", False),
+        "force_sim_physics": bool_cfg("c.force_sim_physics", False),
+        "allow_custom_setups": bool_cfg("c.allow_custom_setups", False),
+        "damage": cfg.get("damage", "FULL"),
+        "league": cfg.get("league", "CUP"),
+        "stage_cfg": cfg.get("stage_cfg", []),
+        "enable_chat": bool_cfg("enable_chat", False),
+        "enable_ai": bool_cfg("enable_ai", False),
+        "trnclass": cfg.get("trnclass") or req.get("category", "N2020"),
+        "friendly_track_name": cfg.get("friendly_track_name", ""),
+        "game_year": cfg.get("game_year", "PRESENT"),
+        "purpose": cfg.get("purpose", "RACE"),
+        "livedata_interval": int(cfg.get("livedata_interval", 1000)),
+        "is_pro_mode": bool_cfg("is_pro_mode", False),
+        "draft_influence": float(cfg.get("draft_influence", 1.0)),
+        "min_users_for_scoring": int(cfg.get("min_users_for_scoring", 1)),
+        # Host identity comes from their user record
         "master_user_id": session,
-        "master_name": "player",
-        "master_is_verified": True
+        "master_name": user.get("name", "player"),
+        "master_is_verified": True,
     }
     games[game_id] = g
-    return response(build_game_response(game_id, g))
+    return response(build_game_response(game_id, g, viewer_session=session))
 
 @app.get("/game")
-async def list_games(start_idx: int = 0, max_results: int = 200, category: str = ""):
-    result = [build_game_response(gid, games[gid]) for gid in games]
+async def list_games(
+    start_idx: int = 0,
+    max_results: int = 200,
+    category: str = "",
+    mgi_bearer_token: str = Header(None),
+):
+    # Filter by category/trnclass if provided
+    filtered = {
+        gid: g for gid, g in games.items()
+        if not category or g.get("trnclass") == category
+    }
+    result = [build_game_response(gid, filtered[gid]) for gid in filtered]
+    paged = result[start_idx: start_idx + max_results]
     return response({
         "total_results": len(result),
         "start_idx": start_idx,
         "max_results": max_results,
-        "games": result
+        "games": paged,
     })
 
+@app.get("/game/{game_id}")
+async def get_game(game_id: str, mgi_bearer_token: str = Header(None)):
+    if game_id not in games:
+        return response({"error": "game not found"}, 404)
+    session = tokens.get(mgi_bearer_token)
+    return response(build_game_response(game_id, games[game_id], viewer_session=session))
+
 @app.post("/game/{game_id}/add_user")
-async def add_user(game_id: str, mgi_bearer_token: str = Header(None)):
+async def add_user(game_id: str, req: dict = {}, mgi_bearer_token: str = Header(None)):
     if game_id not in games:
         return response({"error": "game not found"}, 404)
     if mgi_bearer_token not in tokens:
@@ -184,8 +245,13 @@ async def add_user(game_id: str, mgi_bearer_token: str = Header(None)):
 
     session = tokens[mgi_bearer_token]
     g = games[game_id]
+
+    if len(g["players"]) >= g["max_players"]:
+        return response({"error": "game full"}, 403)
+
     if session not in g["players"]:
         g["players"].append(session)
+
     mp_index = g["players"].index(session)
     return response({"game_id": game_id, "backend": generate_backend(mp_index)})
 
@@ -193,20 +259,21 @@ async def add_user(game_id: str, mgi_bearer_token: str = Header(None)):
 async def leave_game(game_id: str, mgi_bearer_token: str = Header(None)):
     if game_id not in games:
         return response({"error": "game not found"}, 404)
+
     session = tokens.get(mgi_bearer_token)
     g = games[game_id]
     if session in g["players"]:
         g["players"].remove(session)
 
-    # reassign master if needed
     if session == g.get("master_user_id"):
         if g["players"]:
-            g["master_user_id"] = g["players"][0]
-            g["master_name"] = "player"
+            new_master = g["players"][0]
+            g["master_user_id"] = new_master
+            g["master_name"] = users.get(new_master, {}).get("name", "player")
         else:
             g["master_user_id"] = None
             g["master_name"] = None
-            g["master_is_verified"] = True
+            g["master_is_verified"] = False
 
     return response({"left": True, "backend": generate_backend(0)})
 
@@ -228,8 +295,18 @@ async def leaderboard_post(req: dict):
 @app.get("/leaderboard/{name}/{kind}")
 async def leaderboard_get(name: str, kind: str, start_at: int = 0, count: int = 10):
     scores = leaderboards.get(name, [])
-    entries = [{"rank": i+1, "score": score, "user": "player"} for i, score in enumerate(scores[start_at:start_at+count])]
-    return response({"name": name, "kind": kind, "start_at": start_at, "count": count, "entries": entries})
+    entries = [
+        {"rank": i + 1, "score": score, "user": "player"}
+        for i, score in enumerate(scores[start_at: start_at + count])
+    ]
+    return response({
+        "name": name,
+        "kind": kind,
+        "start_at": start_at,
+        "count": count,
+        "total_results": len(scores),
+        "entries": entries,
+    })
 
 # ---------------- CHALLENGES ----------------
 @app.get("/challenge/list")
@@ -243,10 +320,16 @@ async def newsfeed():
 
 # ---------------- STATS ----------------
 @app.get("/stats")
-async def stats(category: str):
+async def stats(category: str = ""):
     return response({"category": category, "stats": []})
 
 # ---------------- TOURNAMENT ----------------
 @app.get("/tournament/event_info/{release}/unified")
 async def tournament_info(release: str):
-    return response({"release": release, "active": [], "upcoming": [], "completed": [], "events": []})
+    return response({
+        "release": release,
+        "active": [],
+        "upcoming": [],
+        "completed": [],
+        "events": [],
+    })
