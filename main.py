@@ -1,533 +1,252 @@
-"""
-NASCAR Heat 5 - Multiplayer Server Emulator
-Reverse engineered from MGI/704Games WebapiBridge
-Base URLs: https://n2020.mgrsys.com/ / https://n2022.mgrsys.com/
-
-Patch GetBaseURL() in your DLL to point here:
-  return "http://127.0.0.1:8000/";
-
-Run: pip install flask && python nh5_server.py
-"""
-
+from fastapi import FastAPI, Header, Request
+from fastapi.responses import JSONResponse
 import uuid
-import secrets
-import os
-from flask import Flask, request, jsonify, abort
+import time
 
-app = Flask(__name__)
+app = FastAPI()
 
-# ── In-memory state ──────────────────────────────────────────────────────────
-users    = {}   # mgi_token -> { session_id, steam_id, name, config, game_id }
-sessions = {}   # game_id   -> { category, capacity, config, users[], state, round_id }
-
-# ── Helpers ──────────────────────────────────────────────────────────────────
-
-def make_token():
-    return secrets.token_hex(32)
-
-def make_id():
-    return str(uuid.uuid4())
-
-def get_token(req):
-    """Extract mgi-bearer-token from request headers."""
-    return req.headers.get("Mgi-Bearer-Token") or req.headers.get("mgi-bearer-token")
-
-def get_user(req):
-    """
-    Resolve caller from mgi-bearer-token header.
-    If token is missing/unknown, create a guest user automatically
-    so the game never gets blocked by auth.
-    """
-    token = get_token(req)
-    if not token:
-        abort(403)
-    if token not in users:
-        # Auto-register unknown tokens (handles "invalid" default token)
-        session_id = make_id()
-        users[token] = {
-            "session_id": session_id,
-            "steam_id":   "unknown",
-            "name":       "Player",
-            "config":     {},
-            "game_id":    None,
-        }
-        print(f"   [AUTO-REGISTER] token={token[:8]}... session={session_id[:8]}...")
-    return token, users[token]
-
-def make_cipher_data():
-    return {
-        "iv":           [0] * 16,
-        "aes_key":      [0] * 32,
-        "hmac_key":     [0] * 32,
-        "conn_suffix":  [0] * 32,
-        "conn_message": [0] * 32,
-        "resp_message": [0] * 32,
-    }
-
-def make_isn():
-    return {
-        "srv_seq": 0,
-        "cli_seq": 0,
-    }
-
-def build_game_session_info(game_id):
-    s = sessions[game_id]
-    cfg = s["config"]
-    # Get the requested keys from the current request context
-    keys = request.args.getlist("val")
-    if keys:
-        fields = [cfg.get(k, "") for k in keys]
-    else:
-        fields = list(cfg.values())
-    return {
-        "id": game_id,
-        "srv": {
-            "users": len(s["users"]),
-            "cap":   s["capacity"],
-        },
-        "fields": fields,
-    }
-
-# ── Logging middleware ────────────────────────────────────────────────────────
-
-@app.before_request
-def log_req():
-    print(f"\n>> {request.method} {request.path}")
-    token = get_token(request)
-    if token:
-        print(f"   Token: {token[:8]}...")
-    body = request.get_data(as_text=True)
+# ---------------- MIDDLEWARE ----------------
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    print(f"\n----- {request.method} {request.url.path} -----")
+    body = await request.body()
     if body:
-        print(f"   Body: {body[:300]}")
-
-@app.after_request
-def log_resp(response):
-    response.headers["ACTUAL-STATUS-CODE"] = str(response.status_code)
-    print(f"   <- {response.status_code}")
+        print("Body:", body.decode())
+    response = await call_next(request)
+    print("Response Status:", response.status_code)
     return response
 
-# ── Auth ──────────────────────────────────────────────────────────────────────
+# ---------------- DATA ----------------
+users = {}
+tokens = {}
+games = {}
+leaderboards = {}
 
-@app.post("/user")
-def login():
-    """
-    WebapiBridge.Login()
-    Client POSTs Steam ticket / platform user info.
-    Returns mgi_token + session_id without validating Steam.
-    """
-    body       = request.get_json(silent=True) or {}
-    steam_id   = str(body.get("platform_user_id", make_id()))
-    name       = body.get("name", "Player")
-    token      = make_token()
-    session_id = make_id()
-    users[token] = {
-        "session_id": session_id,
-        "steam_id":   steam_id,
-        "name":       name,
-        "config":     {},
-        "game_id":    None,
+# ---------------- HELPERS ----------------
+def response(data, code=200):
+    print(f"Returning JSON (status {code}):")
+    import json
+    print(json.dumps(data, indent=2))  # <-- add this
+    r = JSONResponse(content=data)
+    r.headers["ACTUAL-STATUS-CODE"] = str(code)
+    return r
+
+def generate_backend(session_index=0):
+    """Generate a backend object compatible with JoinResponse.IsValid()"""
+    return {
+        "mpidx": session_index,
+        "cipher": {"key": "localdevkey", "iv": "localiv"},
+        "isn": {"send": 1, "recv": 1},
+        "ip": "0.0.0.0"
     }
-    print(f"   [LOGIN] {name} steam={steam_id} token={token[:8]}...")
-    return jsonify({
-        "mgi_token":  token,
-        "session_id": session_id,
-    })
+def build_game_response(gid, g):
+    """Build a full game response including backend data"""
+    if g["players"]:
+        g["master_user_id"] = g.get("master_user_id") or g["players"][0]
+        g["master_name"] = g.get("master_name") or "player"
+        g["master_is_verified"] = g.get("master_is_verified", True)
+
+    session_index = 0  # Default session index for backend
+    return {
+        "id": gid,
+        "s": {
+            "master_user_id": g["master_user_id"],
+            "master_name": g["master_name"],
+            "master_is_verified": g["master_is_verified"],
+            "state": g["state"],
+            "friendly_state": g["friendly_state"],
+            "round_id": g["round_id"],
+            "state_timeout": g["state_timeout"],
+            "platform_session_id": g["platform_session_id"],
+            "platform_correlation_id": g["platform_correlation_id"],
+            "driving_backwards_rule": g["driving_backwards_rule"],
+            "trnclass": g["trnclass"],
+            "purpose": g["purpose"],
+            "livedata_interval": g["livedata_interval"],
+            "is_pro_mode": g["is_pro_mode"],
+            "min_users_for_scoring": g["min_users_for_scoring"]
+        },
+        "c": {
+            "is_private": g["is_private"],
+            "force_sim_physics": g["force_sim_physics"],
+            "allow_custom_setups": g["allow_custom_setups"]
+        },
+        "race_length": g["laps"],
+        "num_laps": g["num_laps"],
+        "wear_factor": g["wear_factor"],
+        "flags": g["flags"],
+        "event_id": g["event_id"],
+        "event_set_id": g["event_set_id"],
+        "session_type": g["session_type"],
+        "damage": g["damage"],
+        "league": g["league"],
+        "stage_cfg": g["stage_cfg"],
+        "enable_chat": g["enable_chat"],
+        "enable_ai": g["enable_ai"],
+        "friendly_track_name": g["friendly_track_name"],
+        "game_year": g["game_year"],
+        "draft_influence": g["draft_influence"],
+        "backend": generate_backend(session_index)
+    }
+
+# ---------------- USER ----------------
+@app.post("/user")
+async def create_user(req: dict):
+    session_id = str(uuid.uuid4())
+    token = str(uuid.uuid4())
+    users[session_id] = {"created": time.time()}
+    tokens[token] = session_id
+    return response({"session_id": session_id, "mgi_token": token})
 
 @app.get("/auth")
-def test_auth():
-    """
-    WebapiBridge.TestAuth()
-    Always return 200 — the default token is literally "invalid" and
-    re-auth only fires if m_plat_auth != null which may not be guaranteed.
-    We handle identity via auto-register in get_user() instead.
-    """
-    get_user(request)
-    return jsonify({})
+async def auth(mgi_bearer_token: str = Header(None)):
+    if mgi_bearer_token not in tokens:
+        return response({"error": "invalid token"}, 403)
+    return response({"status": "ok"})
 
-# ── Game session (lobby) ──────────────────────────────────────────────────────
-
-@app.post("/game")
-def create_game():
-    """WebapiBridge.CreateGameSession()"""
-    token, user = get_user(request)
-    body     = request.get_json(silent=True) or {}
-    config   = dict(body.get("config", {}))
-    capacity = body.get("backend", {}).get("capacity", 8)
-    category = body.get("category", "N2020")
-    game_id  = make_id()
-
-    # Inject server-managed state fields
-    config["s.state"]                   = "lobby"
-    config["s.friendly_state"]          = "In Lobby"
-    config["s.master_user_id"]          = user["session_id"]
-    config["s.master_name"]             = user["name"]
-    config["s.master_is_verified"]      = "false"
-    config["s.platform_session_id"]     = make_id()
-    config["s.platform_correlation_id"] = make_id()
-    config["s.round_id"]                = ""
-    config["s.state_timeout"]           = "-1"
-    config["s.purpose"]                 = "RACE"
-    config["s.livedata_interval"]       = "0"
-    config["s.is_pro_mode"]             = "false"
-    config["s.min_users_for_scoring"]   = "1"
-    config["s.trnclass"]                = ""
-    config["s.driving_backwards_rule"]  = ""
-
-    sessions[game_id] = {
-        "category": category,
-        "capacity": capacity,
-        "config":   config,
-        "users":    [],
-        "state":    "lobby",
-        "round_id": None,
-    }
-    print(f"   [CREATE] game={game_id} cat={category} cap={capacity}")
-    return jsonify({"id": game_id})
-
-@app.get("/game")
-def browse():
-    """WebapiBridge.Browse()"""
-    get_user(request)
-    category    = request.args.get("category", "N2020")
-    start_idx   = int(request.args.get("start_idx",   0))
-    max_results = int(request.args.get("max_results", 20))
-
-    matching = [
-        build_game_session_info(gid)
-        for gid, s in sessions.items()
-        if s["category"] == category or category == "ALL_PLATFORMS"
-    ]
-    page = matching[start_idx: start_idx + max_results]
-    print(f"   [BROWSE] cat={category} results={len(page)}")
-    return jsonify({"games": page})
-
-@app.get("/game/<game_id>")
-def get_game_info(game_id):
-    """WebapiBridge.GetGameInfo()"""
-    get_user(request)
-    if game_id not in sessions:
-        return jsonify({"games": []})
-    return jsonify({"games": [build_game_session_info(game_id)]})
-
-@app.post("/game/<game_id>")
-def set_game_info(game_id):
-    """WebapiBridge.SetGameInfo()"""
-    token, user = get_user(request)
-    if game_id not in sessions:
-        abort(404)
-    body   = request.get_json(silent=True) or {}
-    config = body.get("config", {})
-    sessions[game_id]["config"].update(config)
-    print(f"   [SET_INFO] game={game_id} keys={list(config.keys())}")
-    return jsonify({})
-
-@app.post("/game/<game_id>/add_user")
-def join_game(game_id):
-    """
-    WebapiBridge.JoinGameSession()
-    Returns JoinResponse — must include game_id, mpidx, ip, cipher, isn
-    per BackendAddUserResponse / handle_successful_join_f in NetBridge.
-    """
-    token, user = get_user(request)
-    if game_id not in sessions:
-        abort(404)
-    s = sessions[game_id]
-    if len(s["users"]) >= s["capacity"]:
-        return jsonify({"error": {"sc": 429, "description": "Session full"}}), 429
-
-    # Assign multiplayer slot index
-    used  = {u["mpidx"] for u in s["users"]}
-    mpidx = next(i for i in range(s["capacity"]) if i not in used)
-
-    s["users"].append({
-        "session_id": user["session_id"],
-        "token":      token,
-        "mpidx":      mpidx,
-        "config":     dict(user["config"]),
-        "state":      "lobby",
-    })
-    users[token]["game_id"] = game_id
-
-    print(f"   [JOIN] user={user['session_id'][:8]}... game={game_id} mpidx={mpidx}")
-    return jsonify({
-        "game_id": game_id,
-        "backend": {
-            "mpidx":  mpidx,
-            "ip":     "0.0.0.0",  # Update for LAN/public hosting
-            "cipher": make_cipher_data(),
-            "isn":    make_isn(),
-        }
-    })
-
-@app.post("/game/<game_id>/del_user")
-def leave_game(game_id):
-    """WebapiBridge.LeaveGameSession()"""
-    token, user = get_user(request)
-    if game_id in sessions:
-        s = sessions[game_id]
-        s["users"] = [u for u in s["users"] if u["token"] != token]
-        if not s["users"]:
-            del sessions[game_id]
-            print(f"   [LEAVE] game={game_id} deleted (empty)")
-        else:
-            print(f"   [LEAVE] user={user['session_id'][:8]}... left game={game_id}")
-    users[token]["game_id"] = None
-    return jsonify({})
-
-@app.post("/game/<game_id>/del_user/<user_session_id>")
-def kick_user(game_id, user_session_id):
-    """WebapiBridge.KickUser()"""
-    get_user(request)
-    if game_id in sessions:
-        sessions[game_id]["users"] = [
-            u for u in sessions[game_id]["users"]
-            if u["session_id"] != user_session_id
-        ]
-    print(f"   [KICK] {user_session_id[:8]}... from game={game_id}")
-    return jsonify({})
-
-@app.post("/game/<game_id>/op/<operation>")
-def do_game_op(game_id, operation):
-    """WebapiBridge.DoGameOperation() — lobby state machine."""
-    get_user(request)
-    if game_id not in sessions:
-        abort(404)
-    s = sessions[game_id]
-    print(f"   [OP] game={game_id} op={operation}")
-
-    if operation == "start":
-        round_id = make_id()
-        s["round_id"] = round_id
-        s["state"]    = "load_and_sync"
-        s["config"].update({
-            "s.state":          "load_and_sync",
-            "s.friendly_state": "Loading",
-            "s.round_id":       round_id,
-            "s.state_timeout":  "60",
-        })
-    elif operation == "ready":
-        s["state"] = "racing"
-        s["config"].update({
-            "s.state":          "racing",
-            "s.friendly_state": "Racing",
-            "s.state_timeout":  "-1",
-        })
-    elif operation == "finish":
-        s["state"] = "postrace"
-        s["config"].update({
-            "s.state":          "postrace",
-            "s.friendly_state": "Post Race",
-            "s.state_timeout":  "-1",
-        })
-    elif operation == "reset":
-        s["state"]    = "lobby"
-        s["round_id"] = None
-        s["config"].update({
-            "s.state":          "lobby",
-            "s.friendly_state": "In Lobby",
-            "s.round_id":       "",
-            "s.state_timeout":  "-1",
-        })
-
-    return jsonify({"op": operation, "result": "ok"})
-
-@app.post("/game/<game_id>/reservation")
-def reserve_slots(game_id):
-    """WebapiBridge.ReserveSlots()"""
-    get_user(request)
-    return jsonify({"reservation_id": make_id()})
-
-# ── Round info ────────────────────────────────────────────────────────────────
-
-@app.get("/game/<game_id>/round/<round_id>")
-def get_round_info(game_id, round_id):
-    """WebapiBridge.GetRoundInfo()"""
-    get_user(request)
-    if game_id not in sessions:
-        return jsonify({"games": []})
-    return jsonify({"games": [build_game_session_info(game_id)]})
-
-@app.get("/game/<game_id>/round/<round_id>/participants")
-def get_round_participants(game_id, round_id):
-    """WebapiBridge.GetParticipantInfoForRound()"""
-    get_user(request)
-    if game_id not in sessions:
-        return jsonify({"users": []})
-    s = sessions[game_id]
-    return jsonify({
-        "users": [
-            {"user": {"user": u["session_id"], "idx": u["mpidx"]}, "fields": []}
-            for u in s["users"]
-        ]
-    })
-
-@app.post("/game/<game_id>/round/<round_id>/score")
-def post_score(game_id, round_id):
-    """WebapiBridge.PostScoreEvent()"""
-    get_user(request)
-    print(f"   [SCORE] game={game_id} round={round_id}")
-    return jsonify({})
-
-# ── User info ─────────────────────────────────────────────────────────────────
-
-@app.get("/game/<game_id>/users")
-def get_users_for_game(game_id):
-    """WebapiBridge.GetUserInfoForGameSession()"""
-    get_user(request)
-    keys = request.args.getlist("val")
-    if game_id not in sessions:
-        return jsonify({"users": []})
-    s   = sessions[game_id]
-    out = []
-    for u in s["users"]:
-        user_data = users.get(u["token"], {})
-        cfg    = {**user_data.get("config", {}), **u.get("config", {})}
-        fields = [cfg.get(k, "") for k in keys]
-        out.append({
-            "user":   {"user": u["session_id"], "idx": u["mpidx"]},
-            "fields": fields,
-        })
-    return jsonify({"users": out})
+@app.get("/user/{user_id}")
+async def get_user(user_id: str):
+    if user_id not in users:
+        return response({"error": "user not found"}, 404)
+    return response({"id": user_id})
 
 @app.post("/user/config")
-def set_user_config():
-    """WebapiBridge.SetUserInfo()"""
-    token, user = get_user(request)
-    body   = request.get_json(silent=True) or {}
-    config = body.get("config", {})
-    users[token]["config"].update(config)
-    game_id = users[token].get("game_id")
-    if game_id and game_id in sessions:
-        for u in sessions[game_id]["users"]:
-            if u["token"] == token:
-                u["config"].update(config)
-                break
-    return jsonify({})
+async def user_config(req: dict):
+    return response({"status": "saved"})
 
-@app.get("/user/<user_session_id>")
-def get_user_info(user_session_id):
-    """WebapiBridge.GetUserInfo()"""
-    get_user(request)
-    target = next((u for u in users.values() if u["session_id"] == user_session_id), None)
-    if not target:
-        abort(404)
-    return jsonify({"user": {"user": user_session_id, "idx": 0}, "fields": []})
+# ---------------- GAME ----------------
+@app.post("/game")
+async def create_game(req: dict = {}, mgi_bearer_token: str = Header(None)):
+    if mgi_bearer_token not in tokens:
+        return response({"error": "invalid token"}, 403)
 
-# ── Connection reporting ───────────────────────────────────────────────────────
+    session = tokens[mgi_bearer_token]
+    game_id = str(uuid.uuid4())
+    g = {
+        "players": [session],
+        "max_players": req.get("backend", {}).get("capacity", 20),
+        "state": 0,
+        "friendly_state": "LOBBY",
+        "round_id": str(uuid.uuid4()),
+        "state_timeout": 0,
+        "track": "SomeTrack",
+        "track_name": "Some Track",
+        "series": req.get("config", {}).get("league", "CUP"),
+        "laps": 50,
+        "num_laps": 50,
+        "wear_factor": 1.0,
+        "flags": [],
+        "event_id": "event123",
+        "event_set_id": req.get("config", {}).get("event_set_id", ""),
+        "session_type": req.get("config", {}).get("session_type", "NORMAL"),
+        "platform_session_id": str(uuid.uuid4()),
+        "platform_correlation_id": str(uuid.uuid4()),
+        "driving_backwards_rule": False,
+        "is_private": req.get("config", {}).get("c.is_private", "false") == "true",
+        "force_sim_physics": req.get("config", {}).get("c.force_sim_physics", "false") == "true",
+        "allow_custom_setups": req.get("config", {}).get("c.allow_custom_setups", "false") == "true",
+        "damage": "FULL",
+        "league": req.get("config", {}).get("league", "CUP"),
+        "stage_cfg": [],
+        "enable_chat": req.get("config", {}).get("enable_chat", "false") == "true",
+        "enable_ai": req.get("config", {}).get("enable_ai", "false") == "true",
+        "trnclass": "N2020",
+        "friendly_track_name": "Some Track",
+        "game_year": req.get("config", {}).get("game_year", "PRESENT"),
+        "purpose": "RACE",
+        "livedata_interval": 1000,
+        "is_pro_mode": False,
+        "draft_influence": 1.0,
+        "min_users_for_scoring": 1,
+        "master_user_id": session,
+        "master_name": "player",
+        "master_is_verified": True
+    }
+    games[game_id] = g
+    return response(build_game_response(game_id, g))
 
-@app.post("/info/connection")
-def report_connection_info():
-    """WebapiBridge.ReportConnectionInfo()"""
-    get_user(request)
-    print(f"   [CONN_INFO] {request.get_json(silent=True)}")
-    return jsonify({})
+@app.get("/game")
+async def list_games(start_idx: int = 0, max_results: int = 200, category: str = ""):
+    result = [build_game_response(gid, games[gid]) for gid in games]
+    return response({
+        "total_results": len(result),
+        "start_idx": start_idx,
+        "max_results": max_results,
+        "games": result
+    })
 
-# ── Invitations ────────────────────────────────────────────────────────────────
+@app.post("/game/{game_id}/add_user")
+async def add_user(game_id: str, mgi_bearer_token: str = Header(None)):
+    if game_id not in games:
+        return response({"error": "game not found"}, 404)
+    if mgi_bearer_token not in tokens:
+        return response({"error": "invalid token"}, 403)
 
-@app.post("/invitation/consume")
-def consume_invitation():
-    get_user(request)
-    return jsonify({})
+    session = tokens[mgi_bearer_token]
+    g = games[game_id]
+    if session not in g["players"]:
+        g["players"].append(session)
+    mp_index = g["players"].index(session)
+    return response({"game_id": game_id, "backend": generate_backend(mp_index)})
 
-@app.post("/invitation/send")
-def send_invitation():
-    get_user(request)
-    return jsonify({})
+@app.post("/game/{game_id}/del_user")
+async def leave_game(game_id: str, mgi_bearer_token: str = Header(None)):
+    if game_id not in games:
+        return response({"error": "game not found"}, 404)
+    session = tokens.get(mgi_bearer_token)
+    g = games[game_id]
+    if session in g["players"]:
+        g["players"].remove(session)
 
-# ── Leaderboards ───────────────────────────────────────────────────────────────
+    # reassign master if needed
+    if session == g.get("master_user_id"):
+        if g["players"]:
+            g["master_user_id"] = g["players"][0]
+            g["master_name"] = "player"
+        else:
+            g["master_user_id"] = None
+            g["master_name"] = None
+            g["master_is_verified"] = True
 
-@app.get("/leaderboard/<lb_name>/<kind>")
-def leaderboard_query(lb_name, kind):
-    get_user(request)
-    return jsonify({"entries": []})
+    return response({"left": True, "backend": generate_backend(0)})
 
+@app.post("/game/{game_id}/round/{round_id}/score")
+async def post_score(game_id: str, round_id: str, req: dict):
+    return response({"status": "score_received"})
+
+# ---------------- LEADERBOARD ----------------
 @app.post("/leaderboard")
-def leaderboard_post():
-    get_user(request)
-    return jsonify({"entries": []})
+async def leaderboard_post(req: dict):
+    board = req.get("name", "default")
+    score = req.get("score", 0)
+    if board not in leaderboards:
+        leaderboards[board] = []
+    leaderboards[board].append(score)
+    leaderboards[board].sort(reverse=True)
+    return response({"status": "posted"})
 
-@app.post("/leaderboard/advance_time")
-def leaderboard_advance_time():
-    get_user(request)
-    return jsonify({})
+@app.get("/leaderboard/{name}/{kind}")
+async def leaderboard_get(name: str, kind: str, start_at: int = 0, count: int = 10):
+    scores = leaderboards.get(name, [])
+    entries = [{"rank": i+1, "score": score, "user": "player"} for i, score in enumerate(scores[start_at:start_at+count])]
+    return response({"name": name, "kind": kind, "start_at": start_at, "count": count, "entries": entries})
 
-# ── Stats ──────────────────────────────────────────────────────────────────────
-
-@app.get("/stats")
-def get_stats():
-    get_user(request)
-    return jsonify({
-        "online_players":  len(users),
-        "active_sessions": len(sessions),
-    })
-
-# ── Newsfeed (no auth) ─────────────────────────────────────────────────────────
-
-@app.get("/newsfeed/list")
-def newsfeed_list():
-    return jsonify({"items": []})
-
-@app.get("/newsfeed/<int:item_id>")
-def newsfeed_item(item_id):
-    return jsonify({"item": None})
-
-# ── Analytics (no auth) ────────────────────────────────────────────────────────
-
-@app.post("/analytics/postrace")
-def post_race_analytics():
-    return jsonify({})
-
-# ── Tournament (stub) ──────────────────────────────────────────────────────────
-
-@app.get("/tournament/event_info/<adv>/<subgroup>")
-def tournament_event_info(adv, subgroup):
-    get_user(request)
-    return jsonify({})
-
-@app.get("/tournament/history/<adv>/<subgroup>")
-def tournament_history(adv, subgroup):
-    get_user(request)
-    return jsonify({})
-
-# ── Challenge (stub) ───────────────────────────────────────────────────────────
-
+# ---------------- CHALLENGES ----------------
 @app.get("/challenge/list")
-def challenge_list():
-    get_user(request)
-    return jsonify({"challenges": []})
+async def challenge_list(limit: int = 6, published: str = "yes", full: str = "yes"):
+    return response({"total_results": 0, "start_idx": 0, "max_results": limit, "challenges": []})
 
-@app.get("/challenge/leaderboard/<assists_level>")
-def challenge_leaderboard(assists_level):
-    get_user(request)
-    return jsonify({"entries": []})
+# ---------------- NEWSFEED ----------------
+@app.get("/newsfeed/list")
+async def newsfeed():
+    return response({"items": []})
 
-@app.post("/challenge/completed/<int:challenge_id>")
-def post_challenge(challenge_id):
-    get_user(request)
-    return jsonify({})
+# ---------------- STATS ----------------
+@app.get("/stats")
+async def stats(category: str):
+    return response({"category": category, "stats": []})
 
-# ── Debug ──────────────────────────────────────────────────────────────────────
-
-@app.get("/debug/state")
-def debug_state():
-    return jsonify({
-        "connected_users": len(users),
-        "sessions": {
-            gid: {
-                "category": s["category"],
-                "state":    s["state"],
-                "players":  len(s["users"]),
-                "capacity": s["capacity"],
-            }
-            for gid, s in sessions.items()
-        }
-    })
-
-# ── Entry point ────────────────────────────────────────────────────────────────
-
-if __name__ == "__main__":
-    print("NASCAR Heat 5 - Server Emulator")
-    print("Endpoints: http://127.0.0.1:8000/")
-    print("Debug:     http://127.0.0.1:8000/debug/state")
-    print()
-    app.run(host="0.0.0.0", port=8000, debug=True)
+# ---------------- TOURNAMENT ----------------
+@app.get("/tournament/event_info/{release}/unified")
+async def tournament_info(release: str):
+    return response({"release": release, "active": [], "upcoming": [], "completed": [], "events": []})

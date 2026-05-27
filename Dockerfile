@@ -18,4 +18,4 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
 # 7. Define the command to run the app
-CMD ["python", "main.py"]
+CMD ["python -m uvicorn main:app --host 0.0.0.0 --port 8000"]
