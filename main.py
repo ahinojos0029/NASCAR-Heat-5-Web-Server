@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Header, Request
+from fastapi.responses import JSONResponse
 from starlette.responses import Response
 
 import uuid
@@ -6,9 +7,9 @@ import time
 import socket
 import json
 
-# ---------------- RAW JSON ----------------
 def raw_json(data, status=200):
     body = json.dumps(data, separators=(",", ":")).encode("utf-8")
+
     return Response(
         content=body,
         status_code=status,
@@ -30,8 +31,12 @@ async def log_requests(request: Request, call_next):
         body += chunk if isinstance(chunk, bytes) else chunk.encode()
 
     headers = dict(response.headers)
+
+    headers["ACTUAL-STATUS-CODE"] = str(response.status_code)
     headers["Content-Length"] = str(len(body))
     headers["Connection"] = "close"
+
+    # 🔥 kill chunked encoding
     headers.pop("transfer-encoding", None)
 
     return Response(
@@ -45,6 +50,7 @@ async def log_requests(request: Request, call_next):
 users = {}
 tokens = {}
 games = {}
+leaderboards = {}
 
 # ---------------- HELPERS ----------------
 def get_local_ip():
@@ -54,32 +60,37 @@ def get_local_ip():
         ip = s.getsockname()[0]
         s.close()
         return ip
-    except:
+    except Exception:
         return "127.0.0.1"
 
 LOCAL_IP = get_local_ip()
+
 print(f"[SERVER] Local IP: {LOCAL_IP}")
 
-def get_or_create_session(token):
-    if not token or token.lower() in ["invalid", "none", "", "null", "undefined"]:
-        token = str(uuid.uuid4())
+def resp(data, code=200):
+    print(f"Returning JSON ({code}):")
+    print(json.dumps(data, indent=2))
 
-    if token not in tokens:
-        session_id = str(uuid.uuid4())
-        users[session_id] = {
-            "created": time.time(),
-            "name": "player"
+    return JSONResponse(
+        content=data,
+        status_code=code,
+        headers={
+            "Connection": "close"
         }
-        tokens[token] = session_id
-
-    return token, tokens[token]
+    )
 
 def generate_backend(session_index=0):
     return {
         "mpidx": session_index,
-        "cipher": {"key": "localdevkey", "iv": "localiv"},
-        "isn": {"send": 1, "recv": 1},
-        "ip": LOCAL_IP,
+        "cipher": {
+            "key": "localdevkey",
+            "iv": "localiv"
+        },
+        "isn": {
+            "send": 1,
+            "recv": 1
+        },
+        "ip": "zephyr.proxy.rlwy.net",
     }
 
 def build_game_response(gid, g, viewer_session=None):
@@ -92,6 +103,8 @@ def build_game_response(gid, g, viewer_session=None):
 
     return {
         "id": gid,
+
+        # 🔥 ADD THESE
         "num_users": len(players),
         "max_users": g.get("max_players", 20),
         "has_password": False,
@@ -102,44 +115,46 @@ def build_game_response(gid, g, viewer_session=None):
 
         "s": {
             "master_user_id": g.get("master_user_id") or "",
-            "master_name": g.get("master_name") or "player",
-            "master_is_verified": True,
+            "master_name": g.get("master_name") or "host",
+            "master_is_verified": g.get("master_is_verified", True),
             "state": g.get("state", 0),
             "friendly_state": g.get("friendly_state", "LOBBY"),
             "round_id": g.get("round_id") or str(uuid.uuid4()),
-            "state_timeout": 0,
-            "platform_session_id": "",
-            "platform_correlation_id": "",
-            "driving_backwards_rule": False,
-            "trnclass": "N2020",
-            "purpose": "RACE",
-            "livedata_interval": 1000,
-            "is_pro_mode": False,
-            "min_users_for_scoring": 1,
+            "state_timeout": g.get("state_timeout", 0),
+            "platform_session_id": g.get("platform_session_id") or "",
+            "platform_correlation_id": g.get("platform_correlation_id") or "",
+            "driving_backwards_rule": g.get("driving_backwards_rule", False),
+            "trnclass": g.get("trnclass", "N2020"),
+            "purpose": g.get("purpose", "RACE"),
+            "livedata_interval": g.get("livedata_interval", 1000),
+            "is_pro_mode": g.get("is_pro_mode", False),
+            "min_users_for_scoring": g.get("min_users_for_scoring", 1),
         },
 
         "c": {
-            "is_private": False,
-            "force_sim_physics": False,
-            "allow_custom_setups": False,
+            "is_private": g.get("is_private", False),
+            "force_sim_physics": g.get("force_sim_physics", False),
+            "allow_custom_setups": g.get("allow_custom_setups", False),
         },
 
         "race_length": g.get("race_length", 10),
         "num_laps": g.get("num_laps", 10),
-        "wear_factor": 1.0,
-        "flags": [],
-        "event_id": "",
-        "event_set_id": "",
-        "session_type": "NORMAL",
-        "damage": "FULL",
-        "league": "CUP",
-        "stage_cfg": [25, 25, 50],
+        "wear_factor": g.get("wear_factor", 1.0),
+        "flags": g.get("flags", []),
+        "event_id": g.get("event_id", ""),
+        "event_set_id": g.get("event_set_id", ""),
+        "session_type": g.get("session_type", "NORMAL"),
+        "damage": g.get("damage", "FULL"),
+        "league": g.get("league", "CUP"),
 
-        "enable_chat": True,
-        "enable_ai": False,
-        "friendly_track_name": "Daytona",
-        "game_year": "PRESENT",
-        "draft_influence": 1.0,
+        # 🔥 SAFE DEFAULT
+        "stage_cfg": g.get("stage_cfg") or [25, 25, 50],
+
+        "enable_chat": g.get("enable_chat", True),
+        "enable_ai": g.get("enable_ai", False),
+        "friendly_track_name": g.get("friendly_track_name", "Daytona"),
+        "game_year": g.get("game_year", "PRESENT"),
+        "draft_influence": g.get("draft_influence", 1.0),
 
         "backend": generate_backend(session_index),
     }
@@ -147,38 +162,152 @@ def build_game_response(gid, g, viewer_session=None):
 async def parse_body(request: Request):
     try:
         body = await request.body()
+
         if body:
             return json.loads(body)
+
     except Exception as e:
         print("JSON parse failed:", e)
+
     return {}
 
+def bool_val(v, default=False):
+    if v is None:
+        return default
+
+    if isinstance(v, bool):
+        return v
+
+    return str(v).lower() == "true"
+
+# ---------------- USER ----------------
+def register_token(
+    token,
+    platform="unknown",
+    name="player",
+    version="",
+    client_version=""
+):
+    if token not in tokens:
+        session_id = str(uuid.uuid4())
+
+        users[session_id] = {
+            "created": time.time(),
+            "platform": platform,
+            "name": name,
+            "version": version,
+            "client_version": client_version,
+        }
+
+        tokens[token] = session_id
+
+    return tokens[token]
+
+PLACEHOLDER_TOKENS = {
+    "invalid",
+    "none",
+    "null",
+    "",
+    "undefined"
+}
+
+def is_placeholder(token):
+    return not token or token.lower() in PLACEHOLDER_TOKENS
+
 # ---------------- AUTH ----------------
+def get_token_or_403(mgi_bearer_token: str):
+    if not mgi_bearer_token or mgi_bearer_token not in tokens:
+        return None
+    return tokens[mgi_bearer_token]
+
+
 @app.get("/auth")
 @app.post("/auth")
 async def auth(request: Request, mgi_bearer_token: str = Header(None, alias="mgi-bearer-token")):
-    token, session_id = get_or_create_session(mgi_bearer_token)
+    # ONLY place where tokens are created
+    if not mgi_bearer_token or mgi_bearer_token.lower() in ["invalid", "none", ""]:
+        token = str(uuid.uuid4())
+    else:
+        token = mgi_bearer_token
+
+    if token not in tokens:
+        session_id = str(uuid.uuid4())
+        users[session_id] = {"created": time.time()}
+        tokens[token] = session_id
+
+    session_id = tokens[token]
 
     return raw_json({
         "session_id": session_id,
         "mgi_token": token,
-        "backend": generate_backend(0)
+        "backend": {
+            "mpidx": 0,
+            "ip": LOCAL_IP,
+            "cipher": {"key": "localdevkey", "iv": "localiv"},
+            "isn": {"send": 1, "recv": 1}
+        }
+    })
+
+@app.post("/user")
+async def create_user(request: Request):
+    req = await parse_body(request)
+
+    token = str(uuid.uuid4())
+
+    session_id = register_token(
+        token,
+        platform=req.get("platform", "unknown"),
+        name=req.get("name") or req.get("username") or "player",
+        version=req.get("version", ""),
+        client_version=req.get("client_version", ""),
+    )
+
+    return resp({
+        "session_id": session_id,
+        "mgi_token": token
+    })
+
+@app.get("/user/{user_id}")
+async def get_user(user_id: str):
+    if user_id not in users:
+        return resp({
+            "error": "user not found"
+        }, 404)
+
+    u = users[user_id]
+
+    return resp({
+        "id": user_id,
+        "name": u.get("name", "player")
+    })
+
+@app.post("/user/config")
+async def user_config(request: Request):
+    return resp({
+        "status": "saved"
     })
 
 # ---------------- GAME ----------------
 @app.post("/game")
-async def create_game(request: Request, mgi_bearer_token: str = Header(None, alias="mgi-bearer-token")):
-    token, session = get_or_create_session(mgi_bearer_token)
+async def create_game(
+    request: Request,
+    mgi_bearer_token: str = Header(None, alias="mgi-bearer-token")
+):
+    session = get_token_or_403(mgi_bearer_token)
+    if not session:
+        return resp({"error": "invalid token"}, 403)
+
     user = users.get(session, {})
 
     req = await parse_body(request)
     cfg = req.get("config", {})
+    backend_cfg = req.get("backend", {})
 
     game_id = str(uuid.uuid4())
 
     g = {
         "players": [session],
-        "max_players": 20,
+        "max_players": backend_cfg.get("capacity", 20),
         "state": 0,
         "friendly_state": "LOBBY",
         "round_id": str(uuid.uuid4()),
@@ -186,65 +315,101 @@ async def create_game(request: Request, mgi_bearer_token: str = Header(None, ali
         "num_laps": cfg.get("num_laps", 10),
         "master_user_id": session,
         "master_name": user.get("name", "player"),
+        "master_is_verified": True,
     }
 
     games[game_id] = g
 
-    return raw_json(build_game_response(game_id, g, session))
+    return resp(build_game_response(game_id, g, viewer_session=session))
 
 @app.get("/game")
-async def list_games():
-    return raw_json({
-        "total_results": len(games),
-        "start_idx": 0,
-        "max_results": 200,
-        "games": [
-            build_game_response(gid, g)
-            for gid, g in games.items()
-        ]
+async def list_games(
+    start_idx: int = 0,
+    max_results: int = 200,
+    category: str = ""
+):
+    filtered = {
+        gid: g
+        for gid, g in games.items()
+        if not category or g.get("trnclass") == category
+    }
+
+    result = [
+        build_game_response(gid, filtered[gid])
+        for gid in filtered
+    ]
+
+    paged = result[start_idx:start_idx + max_results]
+
+    return resp({
+        "total_results": len(result),
+        "start_idx": start_idx,
+        "max_results": max_results,
+        "games": paged,
     })
 
 @app.get("/game/{game_id}")
-async def get_game(game_id: str, mgi_bearer_token: str = Header(None, alias="mgi-bearer-token")):
-    token, session = get_or_create_session(mgi_bearer_token)
-
+async def get_game(
+    game_id: str,
+    mgi_bearer_token: str = Header(None, alias="mgi-bearer-token")
+):
     if game_id not in games:
-        return raw_json(build_game_response("invalid", {"players": []}, session))
+        return resp({"error": "game not found"}, 404)
 
-    return raw_json(build_game_response(game_id, games[game_id], session))
+    session = tokens.get(mgi_bearer_token)
+
+    return resp(build_game_response(game_id, games[game_id], viewer_session=session))
 
 @app.post("/game/{game_id}/add_user")
-async def add_user(game_id: str, mgi_bearer_token: str = Header(None, alias="mgi-bearer-token")):
-    token, session = get_or_create_session(mgi_bearer_token)
+async def add_user(
+    game_id: str,
+    request: Request,
+    mgi_bearer_token: str = Header(None, alias="mgi-bearer-token")
+):
+    session = get_token_or_403(mgi_bearer_token)
+    if not session:
+        return resp({"error": "invalid token"}, 403)
 
     if game_id not in games:
-        return raw_json({"game_id": game_id, "backend": generate_backend(0)})
+        return resp({"error": "game not found"}, 404)
 
     g = games[game_id]
 
     if session not in g["players"]:
+        if len(g["players"]) >= g["max_players"]:
+            return resp({"error": "game full"}, 403)
+
         g["players"].append(session)
 
-    idx = g["players"].index(session)
+    mp_index = g["players"].index(session)
 
-    return raw_json({
+    return resp({
         "game_id": game_id,
-        "backend": generate_backend(idx)
+        "backend": generate_backend(mp_index)
     })
 
 @app.post("/game/{game_id}/del_user")
-async def leave_game(game_id: str, mgi_bearer_token: str = Header(None, alias="mgi-bearer-token")):
-    token, session = get_or_create_session(mgi_bearer_token)
+async def leave_game(
+    game_id: str,
+    mgi_bearer_token: str = Header(None, alias="mgi-bearer-token")
+):
+    session = get_token_or_403(mgi_bearer_token)
+    if not session:
+        return resp({"error": "invalid token"}, 403)
 
-    if game_id in games:
-        g = games[game_id]
-        if session in g["players"]:
-            g["players"].remove(session)
+    if game_id not in games:
+        return resp({"error": "game not found"}, 404)
 
-    return raw_json({
-        "left": True,
-        "backend": generate_backend(0)
-    })
+    g = games[game_id]
+
+    if session in g["players"]:
+        g["players"].remove(session)
+
+    return resp({"left": True, "backend": generate_backend(0)})
+
+@app.post("/game/{game_id}/round/{round_id}/score")
+async def post_score(game_id: str, round_id: str, request: Request):
+    return resp({"status": "score_received"})
 
 # ---------------- LEADERBOARD ----------------
 @app.post("/leaderboard")
