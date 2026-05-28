@@ -221,8 +221,35 @@ def is_placeholder(token):
     return not token or token.lower() in PLACEHOLDER_TOKENS
 
 @app.get("/auth")
-async def auth_get(request: Request, mgi_bearer_token: str = Header(None, alias="mgi_bearer_token")):
-    return await auth(request, mgi_bearer_token)
+async def auth(request: Request, mgi_bearer_token: str = Header(None, alias="mgi_bearer_token")):
+    if not mgi_bearer_token or mgi_bearer_token.lower() in ["invalid", "none", ""]:
+        token = str(uuid.uuid4())
+    else:
+        token = mgi_bearer_token
+
+    if token not in tokens:
+        session_id = str(uuid.uuid4())
+        users[session_id] = {"created": time.time()}
+        tokens[token] = session_id
+
+    session_id = tokens[token]
+
+    return raw_json({
+        "session_id": session_id,
+        "mgi_token": token,
+        "backend": {
+            "mpidx": 0,
+            "ip": "zephyr.proxy.rlwy.net",  # 🔥 IMPORTANT
+            "cipher": {
+                "key": "localdevkey",
+                "iv": "localiv"
+            },
+            "isn": {
+                "send": 1,
+                "recv": 1
+            }
+        }
+    })
 
 @app.post("/auth")
 async def auth(request: Request, mgi_bearer_token: str = Header(None, alias="mgi_bearer_token")):
