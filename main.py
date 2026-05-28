@@ -11,8 +11,8 @@ def raw_json(data, status=200):
     body = json.dumps(data, separators=(",", ":")).encode("utf-8")
 
     return Response(
-    content=json.dumps({...}),
-    media_type="application/json"
+        content=json.dumps({...}),
+        media_type="application/json"
     )
 
 app = FastAPI(debug=False)
