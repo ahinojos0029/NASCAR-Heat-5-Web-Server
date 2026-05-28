@@ -11,7 +11,7 @@ def raw_json(data, status=200):
     body = json.dumps(data, separators=(",", ":")).encode("utf-8")
 
     return Response(
-        content=body,  # ✅ send raw bytes, NOT json.dumps again
+        content=body,
         status_code=status,
         media_type="application/json"
     )
@@ -32,13 +32,11 @@ async def log_requests(request: Request, call_next):
 
     headers = dict(response.headers)
 
-    # 🔥 REQUIRED for Unity client
     headers["ACTUAL-STATUS-CODE"] = str(response.status_code)
-
-    # Stability fixes
     headers["Content-Length"] = str(len(body))
     headers["Connection"] = "close"
 
+    # 🔥 kill chunked encoding
     headers.pop("transfer-encoding", None)
 
     return Response(
@@ -201,7 +199,7 @@ def is_placeholder(token):
     return not token or token.lower() in PLACEHOLDER_TOKENS
 
 @app.get("/auth")
-async def auth(request: Request, mgi_bearer_token: str = Header(None, alias="mgi_bearer_token")):
+async def auth_get(request: Request, mgi_bearer_token: str = Header(None, alias="mgi_bearer_token")):
     if not mgi_bearer_token or mgi_bearer_token.lower() in ["invalid", "none", ""]:
         token = str(uuid.uuid4())
     else:
@@ -219,7 +217,7 @@ async def auth(request: Request, mgi_bearer_token: str = Header(None, alias="mgi
         "mgi_token": token,
         "backend": {
             "mpidx": 0,
-            "ip": "zephyr.proxy.rlwy.net",  # 🔥 IMPORTANT
+            "ip": "zephyr.proxy.rlwy.net",
             "cipher": {
                 "key": "localdevkey",
                 "iv": "localiv"
@@ -231,8 +229,9 @@ async def auth(request: Request, mgi_bearer_token: str = Header(None, alias="mgi
         }
     })
 
+
 @app.post("/auth")
-async def auth(request: Request, mgi_bearer_token: str = Header(None, alias="mgi_bearer_token")):
+async def auth_post(request: Request, mgi_bearer_token: str = Header(None, alias="mgi_bearer_token")):
     if not mgi_bearer_token or mgi_bearer_token.lower() in ["invalid", "none", ""]:
         token = str(uuid.uuid4())
     else:
@@ -307,16 +306,21 @@ async def create_game(
     request: Request,
     mgi_bearer_token: str = Header(None, alias="mgi_bearer_token")
 ):
-    if not mgi_bearer_token or mgi_bearer_token not in tokens:
-        return resp({
-            "error": "invalid token"
-        }, 403)
+    # 🔥 FIX: accept placeholder tokens
+    if not mgi_bearer_token or mgi_bearer_token.lower() in ["invalid", "none", ""]:
+        token = str(uuid.uuid4())
+    else:
+        token = mgi_bearer_token
 
-    req = await parse_body(request)
+    if token not in tokens:
+        session_id = str(uuid.uuid4())
+        users[session_id] = {"created": time.time()}
+        tokens[token] = session_id
 
-    session = tokens[mgi_bearer_token]
+    session = tokens[token]
     user = users.get(session, {})
 
+    req = await parse_body(request)
     cfg = req.get("config", {})
     backend_cfg = req.get("backend", {})
 
@@ -338,44 +342,23 @@ async def create_game(
         "session_type": cfg.get("session_type", "NORMAL"),
         "platform_session_id": str(uuid.uuid4()),
         "platform_correlation_id": str(uuid.uuid4()),
-        "driving_backwards_rule": bool_val(
-            cfg.get("driving_backwards_rule"),
-            False
-        ),
+        "driving_backwards_rule": bool_val(cfg.get("driving_backwards_rule"), False),
         "is_private": bool_val(cfg.get("c.is_private"), False),
-        "force_sim_physics": bool_val(
-            cfg.get("c.force_sim_physics"),
-            False
-        ),
-        "allow_custom_setups": bool_val(
-            cfg.get("c.allow_custom_setups"),
-            False
-        ),
+        "force_sim_physics": bool_val(cfg.get("c.force_sim_physics"), False),
+        "allow_custom_setups": bool_val(cfg.get("c.allow_custom_setups"), False),
         "damage": cfg.get("damage", "FULL"),
         "league": cfg.get("league", "CUP"),
         "stage_cfg": cfg.get("stage_cfg", []),
         "enable_chat": bool_val(cfg.get("enable_chat"), False),
         "enable_ai": bool_val(cfg.get("enable_ai"), False),
         "trnclass": cfg.get("trnclass", "N2020"),
-        "friendly_track_name": cfg.get(
-            "friendly_track_name",
-            ""
-        ),
+        "friendly_track_name": cfg.get("friendly_track_name", ""),
         "game_year": cfg.get("game_year", "PRESENT"),
         "purpose": cfg.get("purpose", "RACE"),
-        "livedata_interval": int(
-            cfg.get("livedata_interval", 1000)
-        ),
-        "is_pro_mode": bool_val(
-            cfg.get("is_pro_mode"),
-            False
-        ),
-        "draft_influence": float(
-            cfg.get("draft_influence", 1.0)
-        ),
-        "min_users_for_scoring": int(
-            cfg.get("min_users_for_scoring", 1)
-        ),
+        "livedata_interval": int(cfg.get("livedata_interval", 1000)),
+        "is_pro_mode": bool_val(cfg.get("is_pro_mode"), False),
+        "draft_influence": float(cfg.get("draft_influence", 1.0)),
+        "min_users_for_scoring": int(cfg.get("min_users_for_scoring", 1)),
         "master_user_id": session,
         "master_name": user.get("name", "player"),
         "master_is_verified": True,
@@ -383,13 +366,7 @@ async def create_game(
 
     games[game_id] = g
 
-    return resp(
-        build_game_response(
-            game_id,
-            g,
-            viewer_session=session
-        )
-    )
+    return resp(build_game_response(game_id, g, viewer_session=session))
 
 @app.get("/game")
 async def list_games(
