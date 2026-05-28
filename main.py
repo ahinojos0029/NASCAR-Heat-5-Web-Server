@@ -214,40 +214,17 @@ PLACEHOLDER_TOKENS = {
 def is_placeholder(token):
     return not token or token.lower() in PLACEHOLDER_TOKENS
 
+# ---------------- AUTH ----------------
+def get_token_or_403(mgi_bearer_token: str):
+    if not mgi_bearer_token or mgi_bearer_token not in tokens:
+        return None
+    return tokens[mgi_bearer_token]
+
+
 @app.get("/auth")
-async def auth_get(request: Request, mgi_bearer_token: str = Header(None, alias="mgi_bearer_token")):
-    if not mgi_bearer_token or mgi_bearer_token.lower() in ["invalid", "none", ""]:
-        token = str(uuid.uuid4())
-    else:
-        token = mgi_bearer_token
-
-    if token not in tokens:
-        session_id = str(uuid.uuid4())
-        users[session_id] = {"created": time.time()}
-        tokens[token] = session_id
-
-    session_id = tokens[token]
-
-    return raw_json({
-        "session_id": session_id,
-        "mgi_token": token,
-        "backend": {
-            "mpidx": 0,
-            "ip": "zephyr.proxy.rlwy.net",
-            "cipher": {
-                "key": "localdevkey",
-                "iv": "localiv"
-            },
-            "isn": {
-                "send": 1,
-                "recv": 1
-            }
-        }
-    })
-
-
 @app.post("/auth")
-async def auth_post(request: Request, mgi_bearer_token: str = Header(None, alias="mgi_bearer_token")):
+async def auth(request: Request, mgi_bearer_token: str = Header(None, alias="mgi-bearer-token")):
+    # ONLY place where tokens are created
     if not mgi_bearer_token or mgi_bearer_token.lower() in ["invalid", "none", ""]:
         token = str(uuid.uuid4())
     else:
@@ -266,14 +243,8 @@ async def auth_post(request: Request, mgi_bearer_token: str = Header(None, alias
         "backend": {
             "mpidx": 0,
             "ip": LOCAL_IP,
-            "cipher": {
-                "key": "localdevkey",
-                "iv": "localiv"
-            },
-            "isn": {
-                "send": 1,
-                "recv": 1
-            }
+            "cipher": {"key": "localdevkey", "iv": "localiv"},
+            "isn": {"send": 1, "recv": 1}
         }
     })
 
@@ -320,20 +291,12 @@ async def user_config(request: Request):
 @app.post("/game")
 async def create_game(
     request: Request,
-    mgi_bearer_token: str = Header(None, alias="mgi_bearer_token")
+    mgi_bearer_token: str = Header(None, alias="mgi-bearer-token")
 ):
-    # 🔥 FIX: accept placeholder tokens
-    if not mgi_bearer_token or mgi_bearer_token.lower() in ["invalid", "none", ""]:
-        token = str(uuid.uuid4())
-    else:
-        token = mgi_bearer_token
+    session = get_token_or_403(mgi_bearer_token)
+    if not session:
+        return resp({"error": "invalid token"}, 403)
 
-    if token not in tokens:
-        session_id = str(uuid.uuid4())
-        users[session_id] = {"created": time.time()}
-        tokens[token] = session_id
-
-    session = tokens[token]
     user = users.get(session, {})
 
     req = await parse_body(request)
@@ -348,33 +311,8 @@ async def create_game(
         "state": 0,
         "friendly_state": "LOBBY",
         "round_id": str(uuid.uuid4()),
-        "state_timeout": 0,
         "race_length": cfg.get("race_length", 10),
         "num_laps": cfg.get("num_laps", 10),
-        "wear_factor": float(cfg.get("wear_factor", 1.0)),
-        "flags": cfg.get("flags", []),
-        "event_id": cfg.get("event_id", ""),
-        "event_set_id": cfg.get("event_set_id", ""),
-        "session_type": cfg.get("session_type", "NORMAL"),
-        "platform_session_id": str(uuid.uuid4()),
-        "platform_correlation_id": str(uuid.uuid4()),
-        "driving_backwards_rule": bool_val(cfg.get("driving_backwards_rule"), False),
-        "is_private": bool_val(cfg.get("c.is_private"), False),
-        "force_sim_physics": bool_val(cfg.get("c.force_sim_physics"), False),
-        "allow_custom_setups": bool_val(cfg.get("c.allow_custom_setups"), False),
-        "damage": cfg.get("damage", "FULL"),
-        "league": cfg.get("league", "CUP"),
-        "stage_cfg": cfg.get("stage_cfg", []),
-        "enable_chat": bool_val(cfg.get("enable_chat"), False),
-        "enable_ai": bool_val(cfg.get("enable_ai"), False),
-        "trnclass": cfg.get("trnclass", "N2020"),
-        "friendly_track_name": cfg.get("friendly_track_name", ""),
-        "game_year": cfg.get("game_year", "PRESENT"),
-        "purpose": cfg.get("purpose", "RACE"),
-        "livedata_interval": int(cfg.get("livedata_interval", 1000)),
-        "is_pro_mode": bool_val(cfg.get("is_pro_mode"), False),
-        "draft_influence": float(cfg.get("draft_influence", 1.0)),
-        "min_users_for_scoring": int(cfg.get("min_users_for_scoring", 1)),
         "master_user_id": session,
         "master_name": user.get("name", "player"),
         "master_is_verified": True,
@@ -383,7 +321,6 @@ async def create_game(
     games[game_id] = g
 
     return resp(build_game_response(game_id, g, viewer_session=session))
-
 
 @app.get("/game")
 async def list_games(
@@ -412,50 +349,61 @@ async def list_games(
     })
 
 @app.get("/game/{game_id}")
-async def get_game(game_id: str, mgi_bearer_token: str = Header(None)):
+async def get_game(
+    game_id: str,
+    mgi_bearer_token: str = Header(None, alias="mgi-bearer-token")
+):
     if game_id not in games:
         return resp({"error": "game not found"}, 404)
+
     session = tokens.get(mgi_bearer_token)
+
     return resp(build_game_response(game_id, games[game_id], viewer_session=session))
 
 @app.post("/game/{game_id}/add_user")
-async def add_user(game_id: str, request: Request, mgi_bearer_token: str = Header(None)):
-    if game_id not in games:
-        return resp({"error": "game not found"}, 404)
-    if not mgi_bearer_token or mgi_bearer_token not in tokens:
+async def add_user(
+    game_id: str,
+    request: Request,
+    mgi_bearer_token: str = Header(None, alias="mgi-bearer-token")
+):
+    session = get_token_or_403(mgi_bearer_token)
+    if not session:
         return resp({"error": "invalid token"}, 403)
 
-    session = tokens[mgi_bearer_token]
+    if game_id not in games:
+        return resp({"error": "game not found"}, 404)
+
     g = games[game_id]
 
-    if len(g["players"]) >= g["max_players"] and session not in g["players"]:
-        return resp({"error": "game full"}, 403)
-
     if session not in g["players"]:
+        if len(g["players"]) >= g["max_players"]:
+            return resp({"error": "game full"}, 403)
+
         g["players"].append(session)
 
     mp_index = g["players"].index(session)
-    return resp({"game_id": game_id, "backend": generate_backend(mp_index)})
+
+    return resp({
+        "game_id": game_id,
+        "backend": generate_backend(mp_index)
+    })
 
 @app.post("/game/{game_id}/del_user")
-async def leave_game(game_id: str, mgi_bearer_token: str = Header(None)):
+async def leave_game(
+    game_id: str,
+    mgi_bearer_token: str = Header(None, alias="mgi-bearer-token")
+):
+    session = get_token_or_403(mgi_bearer_token)
+    if not session:
+        return resp({"error": "invalid token"}, 403)
+
     if game_id not in games:
         return resp({"error": "game not found"}, 404)
 
-    session = tokens.get(mgi_bearer_token)
     g = games[game_id]
-    if session and session in g["players"]:
-        g["players"].remove(session)
 
-    if session == g.get("master_user_id"):
-        if g["players"]:
-            new_master = g["players"][0]
-            g["master_user_id"] = new_master
-            g["master_name"] = users.get(new_master, {}).get("name", "player")
-        else:
-            g["master_user_id"] = None
-            g["master_name"] = None
-            g["master_is_verified"] = False
+    if session in g["players"]:
+        g["players"].remove(session)
 
     return resp({"left": True, "backend": generate_backend(0)})
 
