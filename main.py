@@ -112,7 +112,7 @@ def generate_backend(session_index=0):
             "send": 1,
             "recv": 1
         },
-        "ip": LOCAL_IP,
+        "ip": "zephyr.proxy.rlwy.net",
     }
 
 def build_game_response(gid, g, viewer_session=None):
