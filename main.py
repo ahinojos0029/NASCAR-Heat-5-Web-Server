@@ -256,7 +256,7 @@ async def stats():
 # ---------------- TOURNAMENT ----------------
 @app.get("/tournament/event_info/{release}/unified")
 async def tournament_info(release: str):
-    return resp({
+    return raw_json({
         "release":   release,
         "active":    [],
         "upcoming":  [],
