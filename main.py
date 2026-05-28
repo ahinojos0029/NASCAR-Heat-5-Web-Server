@@ -11,7 +11,8 @@ def raw_json(data, status=200):
     body = json.dumps(data, separators=(",", ":")).encode("utf-8")
 
     return Response(
-        content=json.dumps({...}),
+        content=body,  # ✅ send raw bytes, NOT json.dumps again
+        status_code=status,
         media_type="application/json"
     )
 
@@ -37,6 +38,8 @@ async def log_requests(request: Request, call_next):
     # Stability fixes
     headers["Content-Length"] = str(len(body))
     headers["Connection"] = "close"
+
+    headers.pop("transfer-encoding", None)
 
     return Response(
         content=body,
