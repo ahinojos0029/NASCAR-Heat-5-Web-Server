@@ -103,43 +103,59 @@ def build_game_response(gid, g, viewer_session=None):
 
     return {
         "id": gid,
+
+        # 🔥 ADD THESE
+        "num_users": len(players),
+        "max_users": g.get("max_players", 20),
+        "has_password": False,
+        "ping": 0,
+        "region": "us",
+        "build": "1.0",
+        "joinable": True,
+
         "s": {
-            "master_user_id": g["master_user_id"],
-            "master_name": g["master_name"],
-            "master_is_verified": g["master_is_verified"],
-            "state": g["state"],
-            "friendly_state": g["friendly_state"],
-            "round_id": g["round_id"],
-            "state_timeout": g["state_timeout"],
-            "platform_session_id": g["platform_session_id"],
-            "platform_correlation_id": g["platform_correlation_id"],
-            "driving_backwards_rule": g["driving_backwards_rule"],
-            "trnclass": g["trnclass"],
-            "purpose": g["purpose"],
-            "livedata_interval": g["livedata_interval"],
-            "is_pro_mode": g["is_pro_mode"],
-            "min_users_for_scoring": g["min_users_for_scoring"],
+            "master_user_id": g.get("master_user_id") or "",
+            "master_name": g.get("master_name") or "host",
+            "master_is_verified": g.get("master_is_verified", True),
+            "state": g.get("state", 0),
+            "friendly_state": g.get("friendly_state", "LOBBY"),
+            "round_id": g.get("round_id") or str(uuid.uuid4()),
+            "state_timeout": g.get("state_timeout", 0),
+            "platform_session_id": g.get("platform_session_id") or "",
+            "platform_correlation_id": g.get("platform_correlation_id") or "",
+            "driving_backwards_rule": g.get("driving_backwards_rule", False),
+            "trnclass": g.get("trnclass", "N2020"),
+            "purpose": g.get("purpose", "RACE"),
+            "livedata_interval": g.get("livedata_interval", 1000),
+            "is_pro_mode": g.get("is_pro_mode", False),
+            "min_users_for_scoring": g.get("min_users_for_scoring", 1),
         },
+
         "c": {
-            "is_private": g["is_private"],
-            "force_sim_physics": g["force_sim_physics"],
-            "allow_custom_setups": g["allow_custom_setups"],
+            "is_private": g.get("is_private", False),
+            "force_sim_physics": g.get("force_sim_physics", False),
+            "allow_custom_setups": g.get("allow_custom_setups", False),
         },
-        "race_length": g["race_length"],
-        "num_laps": g["num_laps"],
-        "wear_factor": g["wear_factor"],
-        "flags": g["flags"],
-        "event_id": g["event_id"],
-        "event_set_id": g["event_set_id"],
-        "session_type": g["session_type"],
-        "damage": g["damage"],
-        "league": g["league"],
-        "stage_cfg": g["stage_cfg"],
-        "enable_chat": g["enable_chat"],
-        "enable_ai": g["enable_ai"],
-        "friendly_track_name": g["friendly_track_name"],
-        "game_year": g["game_year"],
-        "draft_influence": g["draft_influence"],
+
+        "race_length": g.get("race_length", 10),
+        "num_laps": g.get("num_laps", 10),
+        "wear_factor": g.get("wear_factor", 1.0),
+        "flags": g.get("flags", []),
+        "event_id": g.get("event_id", ""),
+        "event_set_id": g.get("event_set_id", ""),
+        "session_type": g.get("session_type", "NORMAL"),
+        "damage": g.get("damage", "FULL"),
+        "league": g.get("league", "CUP"),
+
+        # 🔥 SAFE DEFAULT
+        "stage_cfg": g.get("stage_cfg") or [25, 25, 50],
+
+        "enable_chat": g.get("enable_chat", True),
+        "enable_ai": g.get("enable_ai", False),
+        "friendly_track_name": g.get("friendly_track_name", "Daytona"),
+        "game_year": g.get("game_year", "PRESENT"),
+        "draft_influence": g.get("draft_influence", 1.0),
+
         "backend": generate_backend(session_index),
     }
 
@@ -367,6 +383,7 @@ async def create_game(
     games[game_id] = g
 
     return resp(build_game_response(game_id, g, viewer_session=session))
+
 
 @app.get("/game")
 async def list_games(
