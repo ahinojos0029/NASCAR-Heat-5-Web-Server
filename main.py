@@ -26,46 +26,28 @@ app = FastAPI(debug=False)
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     print(f"\n----- {request.method} {request.url.path} -----")
-
-    print("Headers:")
-    for k, v in request.headers.items():
-        print(f"{k}: {v}")
-
-    body_bytes = await request.body()
-
-    if body_bytes:
-        print("Body:")
-        print(body_bytes.decode(errors="replace"))
+    print("Headers:", dict(request.headers))
 
     response = await call_next(request)
 
-    print("Response Status:", response.status_code)
-
-    # Read original body EXACTLY as produced
     body = b""
-
     async for chunk in response.body_iterator:
-        if isinstance(chunk, str):
-            chunk = chunk.encode()
-        body += chunk
+        body += chunk if isinstance(chunk, bytes) else chunk.encode()
 
-    # Preserve original headers
     headers = dict(response.headers)
 
-    # Prevent chunked encoding
+    # 🔥 REQUIRED for Unity client
+    headers["ACTUAL-STATUS-CODE"] = str(response.status_code)
+
+    # Stability fixes
     headers["Content-Length"] = str(len(body))
-
-    # Older Unity WWW clients behave better with this
     headers["Connection"] = "close"
-
-    # Disable compression just in case
-    headers.pop("Transfer-Encoding", None)
 
     return Response(
         content=body,
         status_code=response.status_code,
         headers=headers,
-        media_type=response.media_type,
+        media_type=response.media_type
     )
 
 # ---------------- DATA ----------------
