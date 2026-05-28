@@ -13,7 +13,7 @@ def raw_json(data, status=200):
     return Response(
     content=json.dumps({...}),
     media_type="application/json"
-)
+    )
 
 app = FastAPI(debug=False)
 
