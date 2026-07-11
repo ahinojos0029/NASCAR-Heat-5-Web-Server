@@ -1,11 +1,10 @@
-# app.py – NASCAR Heat 5 emulator for Railway (no Docker needed)
-# --------------------------------------------------------------
-# * Reads $PORT from the environment (Railway injects this)
-# * Logs request/response at INFO level so you can see them in
-#   Railway’s deployment logs.
-# * Returns proper JSON with correct Content‑Type for every endpoint.
-# * Never falls back to Flask’s HTML error pages.
-# --------------------------------------------------------------
+# app.py – NASCAR Heat 5 emulator (Flask) that works with UnityWebRequest
+# ----------------------------------------------------------------------
+# * Adds the ACTUAL-STATUS-CODE header that Unity expects
+# * Always returns JSON with correct Content-Type
+# * Never falls back to Flask's HTML error pages
+# * Reads $PORT from the environment (Railway, localhost, etc.)
+# ----------------------------------------------------------------------
 
 import json
 import os
@@ -44,10 +43,17 @@ def make_user_id():    return str(uuid.uuid4())
 def make_game_id():    return f"game_{len(games) + 1}"
 
 def json_response(data, status=200):
-    """Always return JSON + correct content‑type."""
+    """
+    Return a Flask Response object that:
+      * has application/json Content-Type
+      * carries the ACTUAL-STATUS-CODE header Unity reads
+      * contains the JSON-serialized *data* (even for errors)
+    """
     resp = jsonify(data)
     resp.status_code = status
     resp.headers["Content-Type"] = "application/json"
+    # UnityWebRequest.ActualStatusCode() looks for this header
+    resp.headers["ACTUAL-STATUS-CODE"] = str(status)
     return resp
 
 def require_auth():
@@ -61,7 +67,7 @@ def require_auth():
 # Request / Response logging (INFO level – visible in Railway logs)
 # ----------------------------------------------------------------------
 @app.before_request
-def log_request_info():
+def _log_request():
     body = request.get_data()
     body_preview = (
         body[:200].decode('utf-8', errors='replace')
@@ -69,15 +75,13 @@ def log_request_info():
     )
     app.logger.info(
         ">>> %s %s\nHeaders: %s\nBody (%d bytes): %s",
-        request.method,
-        request.path,
+        request.method, request.path,
         dict(request.headers),
-        len(body),
-        body_preview,
+        len(body), body_preview
     )
 
 @app.after_request
-def log_response_info(response):
+def _log_response(response):
     data = response.get_data()
     data_preview = (
         data[:200].decode('utf-8', errors='replace')
@@ -85,11 +89,9 @@ def log_response_info(response):
     )
     app.logger.info(
         "<<< %s %s\nHeaders: %s\nBody (%d bytes): %s",
-        response.status,
-        response.status_code,
+        response.status, response.status_code,
         dict(response.headers),
-        len(data),
-        data_preview,
+        len(data), data_preview
     )
     return response
 
@@ -103,7 +105,8 @@ def log_response_info(response):
 @app.errorhandler(405)
 @app.errorhandler(500)
 def json_error(e):
-    return jsonify({"error": str(e)}), getattr(e, "code", 500)
+    # Always return JSON, never Flask's default HTML page
+    return json_response({"error": str(e)}), getattr(e, "code", 500)
 
 # ----------------------------------------------------------------------
 # AUTHENTICATION
@@ -151,7 +154,7 @@ def browse():
     start = int(request.args.get("start_idx", 0))
     max_results = int(request.args.get("max_results", 20))
     game_list = []
-    for gid, g in list(games.items())[start:start + max_results]:
+    for gid, g in list(games.items())[start:start+max_results]:
         game_list.append(build_game_session_info(gid, g))
     return json_response({"games": game_list})
 
@@ -172,7 +175,7 @@ def round_info(game_id, round_id):
     if data and data.get("games"):
         data["games"][0]["roundId"] = str(round_id)
         return json_response(data)
-    return resp   # fallback (should never hit)
+    return resp   # fallback (should never happen)
 
 def build_game_session_info(game_id, game_data):
     config = game_data.get("config", {})
@@ -340,7 +343,7 @@ def get_user(user_id):
         "isVerified": u.get("isVerified", False),
         "basePersonaId": u.get("basePersonaId", ""),
         "appearanceId": u.get("appearanceId", ""),
-        "jingle": u.get("jingle", ""),
+        "jingle": u.get("jinge", ""),
         "rollingPoints": int(u.get("rollingPoints", 0)),
         "badge": u.get("badge", None),
     }
@@ -422,7 +425,7 @@ def newsfeed_item(item_id):
         if item["id"] == item_id:
             return json_response(item)
     # Not found – still return JSON (400/404 would be HTML otherwise)
-    return jsonify({"error": "not found"}), 404
+    return json_response({"error": "not found"}), 404
 
 # ----------------------------------------------------------------------
 # ANALYTICS
@@ -440,7 +443,7 @@ def leaderboard_query(lb_name, kind):
     start = int(request.args.get("start_at", 0))
     cnt   = int(request.args.get("count", 0))
     entries = leaderboards.get(lb_name, [])
-    sliced  = entries[start:start + cnt]
+    sliced  = entries[start:start+cnt]
     return json_response({"entries": sliced, "total": len(entries)})
 
 @app.route("/leaderboard", methods=["POST"])
