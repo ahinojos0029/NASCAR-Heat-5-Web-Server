@@ -18,7 +18,8 @@ app = Flask(__name__)
 # ----------------------------------------------------------------------
 sessions = {}          # token -> {"session_id": str, "user_id": str}
 users   = {}           # user_id -> dict with user fields
-games   = {}           # game_id -> {"config":{}, "users":set(), "reservations":int, "scores":{}}
+games   = {}           # game_id -> {"config":{}, "users":set(),
+                       #            "reservations":int, "scores":{}}
 leaderboards = {}
 newsfeed_items = [{
     "id": 1,
@@ -44,15 +45,15 @@ def make_game_id():    return f"game_{len(games) + 1}"
 
 def json_response(data, status=200):
     """
-    Return a Flask Response object that:
-      * has application/json Content-Type
+    Return a Flask Response that:
+      * has application/json Content‑Type
       * carries the ACTUAL-STATUS-CODE header Unity reads
-      * contains the JSON-serialized *data* (even for errors)
+      * contains the JSON‑serialized *data* (even for errors)
     """
     resp = jsonify(data)
     resp.status_code = status
     resp.headers["Content-Type"] = "application/json"
-    # UnityWebRequest.ActualStatusCode() looks for this header
+    # UnityWebRequest.ActiveStatusCode() reads this header
     resp.headers["ACTUAL-STATUS-CODE"] = str(status)
     return resp
 
@@ -117,7 +118,11 @@ def create_user():
     Request: UserSessionCreateResponse
     Response: { "session_id": "...", "mgi_token": "..." }
     """
-    _ = request.get_json(silent=True) or {}
+    payload = request.get_json(silent=True)
+    if payload is None:
+        return json_response({"error": "invalid JSON"}, 400)
+
+    _ = payload  # we don’t need the fields for the emulator
     user_id = make_user_id()
     token   = make_token()
     session_id = make_session_id()
@@ -227,42 +232,72 @@ def build_game_session_info(game_id, game_data):
 def reserve_slots(game_id):
     if game_id not in games:
         games[game_id] = {"config":{}, "users":set(), "reservations":0, "scores":{}}
-    data = request.get_json(silent=True) or {}
-    games[game_id]["reservations"] = data.get("count", 0)
+    payload = request.get_json(silent=True)
+    if payload is None:
+        return json_response({"error": "invalid JSON"}, 400)
+    games[game_id]["reservations"] = payload.get("count", 0)
     return json_response({})
 
 @app.route("/game", methods=["POST"])
 def create_game():
-    data = request.get_json(silent=True) or {}
+    """
+    Expected request: GameSessionCreateRequest
+    {
+        "backend":   {...},
+        "config":    {...},
+        "category":  "...",
+        "tid":       {...}
+    }
+    Expected response: GameSessionCreateResponse { "id": "<new‑game‑id>" }
+    """
+    payload = request.get_json(silent=True)
+    if payload is None:
+        return json_response({"error": "invalid JSON"}, 400)
+
+    # We don’t need to validate the inner objects for the emulator,
+    # but we keep them so the stored game reflects what the client sent.
     gid = make_game_id()
     games[gid] = {
-        "config": data.get("config", {}),
+        "config": payload.get("config", {}),
         "users": set(),
         "reservations": 0,
         "scores": {}
     }
+
+    # The real service only returns the id; we mirror that.
     return json_response({"id": gid})
 
 @app.route("/game/<game_id>/add_user", methods=["POST"])
 def add_user(game_id):
+    """
+    Request: JoinRequest { "reservation": "...", "trn_user_subgroup": "..." }
+    Response: JoinResponse (empty JSON)
+    """
     sess = require_auth()
     user_id = sess["user_id"]
     if game_id not in games:
+        # If the game does not exist yet, create a stub so the call succeeds.
         games[game_id] = {"config":{}, "users":set(), "reservations":0, "scores":{}}
     games[game_id]["users"].add(user_id)
     return json_response({})
 
 @app.route("/game/<game_id>", methods=["POST"])
 def set_game_info(game_id):
+    """
+    Request: GameSessionConfigRequest { "config": {...} }
+    Response: EmptyResponse
+    """
     if game_id not in games:
         games[game_id] = {"config":{}, "users":set(), "reservations":0, "scores":{}}
-    data = request.get_json(silent=True) or {}
-    games[game_id]["config"].update(data.get("config", {}))
+    payload = request.get_json(silent=True)
+    if payload is None:
+        return json_response({"error": "invalid JSON"}, 400)
+    games[game_id]["config"].update(payload.get("config", {}))
     return json_response({})
 
 @app.route("/game/<game_id>/op/<op>", methods=["POST"])
 def game_op(game_id, op):
-    # No state change needed for the emulator
+    # No state change needed for the emulator.
     return json_response({})
 
 @app.route("/game/<game_id>/del_user", methods=["POST"])
@@ -343,7 +378,7 @@ def get_user(user_id):
         "isVerified": u.get("isVerified", False),
         "basePersonaId": u.get("basePersonaId", ""),
         "appearanceId": u.get("appearanceId", ""),
-        "jingle": u.get("jinge", ""),
+        "jingle": u.get("jingle", ""),
         "rollingPoints": int(u.get("rollingPoints", 0)),
         "badge": u.get("badge", None),
     }
@@ -353,8 +388,10 @@ def get_user(user_id):
 def set_user_info():
     sess = require_auth()
     user_id = sess["user_id"]
-    data = request.get_json(silent=True) or {}
-    cfg = data.get("config", {})
+    payload = request.get_json(silent=True)
+    if payload is None:
+        return json_response({"error": "invalid JSON"}, 400)
+    cfg = payload.get("config", {})
     if user_id in users:
         users[user_id].update(cfg)
     else:
@@ -383,10 +420,12 @@ def set_user_info():
 def post_score_event(game_id, round_id):
     if game_id not in games:
         games[game_id] = {"config":{}, "users":set(), "reservations":0, "scores":{}}
-    data = request.get_json(silent=True) or {}
+    payload = request.get_json(silent=True)
+    if payload is None:
+        return json_response({"error": "invalid JSON"}, 400)
     event = {
-        "lapData": data.get("data"),          # may be None
-        "raceTimeData": data.get("racetime_data")
+        "lapData": payload.get("data"),          # may be None
+        "raceTimeData": payload.get("racetime_data")
     }
     games[game_id]["scores"].setdefault(round_id, []).append(event)
     return json_response({})
@@ -396,12 +435,16 @@ def post_score_event(game_id, round_id):
 # ----------------------------------------------------------------------
 @app.route("/invitation/consume", methods=["POST"])
 def consume_invitation():
-    _ = request.get_json(silent=True) or {}
+    payload = request.get_json(silent=True)
+    if payload is None:
+        return json_response({"error": "invalid JSON"}, 400)
     return json_response({})
 
 @app.route("/invitation/send", methods=["POST"])
 def invite_bunch():
-    _ = request.get_json(silent=True) or {}
+    payload = request.get_json(silent=True)
+    if payload is None:
+        return json_response({"error": "invalid JSON"}, 400)
     return json_response({})
 
 # ----------------------------------------------------------------------
@@ -409,7 +452,9 @@ def invite_bunch():
 # ----------------------------------------------------------------------
 @app.route("/info/connection", methods=["POST"])
 def report_connection():
-    _ = request.get_json(silent=True) or {}
+    payload = request.get_json(silent=True)
+    if payload is None:
+        return json_response({"error": "invalid JSON"}, 400)
     return json_response({})
 
 # ----------------------------------------------------------------------
@@ -432,7 +477,9 @@ def newsfeed_item(item_id):
 # ----------------------------------------------------------------------
 @app.route("/analytics/postrace", methods=["POST"])
 def post_race_analytics():
-    _ = request.get_json(silent=True) or {}
+    payload = request.get_json(silent=True)
+    if payload is None:
+        return json_response({"error": "invalid JSON"}, 400)
     return json_response({})
 
 # ----------------------------------------------------------------------
@@ -448,8 +495,10 @@ def leaderboard_query(lb_name, kind):
 
 @app.route("/leaderboard", methods=["POST"])
 def leaderboard_post():
-    data = request.get_json(silent=True) or {}
-    posts = data.get("posts", [])
+    payload = request.get_json(silent=True)
+    if payload is None:
+        return json_response({"error": "invalid JSON"}, 400)
+    posts = payload.get("posts", [])
     lb_name = "global"               # simple fallback
     leaderboards.setdefault(lb_name, []).extend(posts)
     return json_response({"entries": leaderboards[lb_name][-len(posts):],
@@ -457,7 +506,9 @@ def leaderboard_post():
 
 @app.route("/leaderboard/advance_time", methods=["POST"])
 def advance_leaderboard_time():
-    _ = request.get_json(silent=True) or {}
+    payload = request.get_json(silent=True)
+    if payload is None:
+        return json_response({"error": "invalid JSON"}, 400)
     return json_response({"entries": [], "total": 0})
 
 # ----------------------------------------------------------------------
@@ -503,7 +554,9 @@ def challenge_leaderboard(assists_level):
 
 @app.route("/challenge/completed/<challenge_id>", methods=["POST"])
 def post_challenge_leaderboard(challenge_id):
-    _ = request.get_json(silent=True) or {}
+    payload = request.get_json(silent=True)
+    if payload is None:
+        return json_response({"error": "invalid JSON"}, 400)
     return json_response({"entries": []})
 
 # ----------------------------------------------------------------------
