@@ -4,6 +4,7 @@
 # * Always returns JSON with correct Content-Type
 # * Guarantees HTTP 200 status (errors are reported inside JSON)
 # * Adds the ACTUAL-STATUS-CODE header that Unity expects
+# * Accepts any MGI-Bearer-Token (creates a temporary session if needed)
 # * Reads $PORT from the environment (Railway, localhost, etc.)
 # ----------------------------------------------------------------------
 
@@ -69,13 +70,36 @@ def json_response(data, status_code=200):
     return resp
 
 def require_auth():
-    """Validate MGI‑Bearer‑Token; abort 401 if missing/invalid."""
+    """
+    Validate MGI-Bearer‑Token.
+    For the emulator we accept any token (including "invalid" or missing)
+    and create a temporary session/user if needed.
+    Returns the session dict: {"session_id":..., "user_id":...}
+    """
     token = request.headers.get("MGI-Bearer-Token")
-    if token not in sessions:
-        # Instead of letting Flask abort (which would produce a non‑200),
-        # we return a JSON error inside a 200 response.
-        return None   # Signal caller to produce an error payload
-    return sessions[token]   # {"session_id":…, "user_id":…}
+    if token in sessions:
+        return sessions[token]
+
+    # Token not known – create a temporary user/session so the call succeeds
+    user_id = make_user_id()
+    session_id = make_session_id()
+    sessions[token] = {"session_id": session_id, "user_id": user_id}
+    # Provide a minimal user record so later look‑ups work
+    users[user_id] = {
+        "userId": user_id,
+        "isLocalUser": True,
+        "mpIdx": 0,
+        "name": "Player",
+        "platformUserId": "",
+        "sortVal": 0.0,
+        "isVerified": False,
+        "basePersonaId": "",
+        "appearanceId": "",
+        "jingle": "",
+        "rollingPoints": 0,
+        "badge": None,
+    }
+    return sessions[token]
 
 # ----------------------------------------------------------------------
 # Request / Response logging (visible in Railway logs)
@@ -258,10 +282,8 @@ def add_user(game_id):
     Request: JoinRequest (we ignore the content)
     Response: JoinResponse (empty JSON)
     """
+    # Auth now always succeeds (creates a temporary session if needed)
     sess = require_auth()
-    if sess is None:
-        # No valid token – return error inside a 200 response
-        return json_response({"error": "Invalid or missing token"}), 200
     user_id = sess["user_id"]
     if game_id not in games:
         games[game_id] = {"config":{}, "users":set(), "reservations":0, "scores":{}}
@@ -283,8 +305,6 @@ def game_op(game_id, op):
 @app.route("/game/<game_id>/del_user", methods=["POST"])
 def remove_user(game_id):
     sess = require_auth()
-    if sess is None:
-        return json_response({"error": "Invalid or missing token"}), 200
     user_id = sess["user_id"]
     if game_id in games:
         games[game_id]["users"].discard(user_id)
@@ -304,8 +324,6 @@ def participants(game_id, round_id):
     if game_id not in games:
         return json_response({"users": []})
     sess = require_auth()
-    if sess is None:
-        return json_response({"error": "Invalid or missing token"}), 200
     local_user_id = sess["user_id"]
     user_list = []
     for idx, uid in enumerate(games[game_id]["users"]):
@@ -369,14 +387,13 @@ def get_user(user_id):
 @app.route("/user/config", methods=["POST"])
 def set_user_info():
     sess = require_auth()
-    if sess is None:
-        return json_response({"error": "Invalid or missing token"}), 200
     user_id = sess["user_id"]
     payload = request.get_json(silent=True) or {}
     cfg = payload.get("config", {})
     if user_id in users:
         users[user_id].update(cfg)
     else:
+        # create a stub if somehow missing
         users[user_id] = {
             "userId": user_id,
             "isLocalUser": True,
