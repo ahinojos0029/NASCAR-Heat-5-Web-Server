@@ -1,4 +1,12 @@
-# app.py
+# app.py – NASCAR Heat 5 emulator for Railway (no Docker needed)
+# --------------------------------------------------------------
+# * Reads $PORT from the environment (Railway injects this)
+# * Logs request/response at INFO level so you can see them in
+#   Railway’s deployment logs.
+# * Returns proper JSON with correct Content‑Type for every endpoint.
+# * Never falls back to Flask’s HTML error pages.
+# --------------------------------------------------------------
+
 import json
 import os
 import uuid
@@ -50,28 +58,38 @@ def require_auth():
     return sessions[token]   # {"session_id":…, "user_id":…}
 
 # ----------------------------------------------------------------------
-# Request / Response logging (helps you debug while on Railway)
+# Request / Response logging (INFO level – visible in Railway logs)
 # ----------------------------------------------------------------------
 @app.before_request
 def log_request_info():
     body = request.get_data()
-    body_preview = body[:200].decode('utf-8', errors='replace') if body else ''
-    app.logger.debug(
+    body_preview = (
+        body[:200].decode('utf-8', errors='replace')
+        if body else ''
+    )
+    app.logger.info(
         ">>> %s %s\nHeaders: %s\nBody (%d bytes): %s",
-        request.method, request.path,
+        request.method,
+        request.path,
         dict(request.headers),
-        len(body), body_preview
+        len(body),
+        body_preview,
     )
 
 @app.after_request
 def log_response_info(response):
     data = response.get_data()
-    data_preview = data[:200].decode('utf-8', errors='replace') if data else ''
-    app.logger.debug(
+    data_preview = (
+        data[:200].decode('utf-8', errors='replace')
+        if data else ''
+    )
+    app.logger.info(
         "<<< %s %s\nHeaders: %s\nBody (%d bytes): %s",
-        response.status, response.status_code,
+        response.status,
+        response.status_code,
         dict(response.headers),
-        len(data), data_preview
+        len(data),
+        data_preview,
     )
     return response
 
@@ -92,6 +110,10 @@ def json_error(e):
 # ----------------------------------------------------------------------
 @app.route("/user", methods=["POST"])
 def create_user():
+    """
+    Request: UserSessionCreateResponse
+    Response: { "session_id": "...", "mgi_token": "..." }
+    """
     _ = request.get_json(silent=True) or {}
     user_id = make_user_id()
     token   = make_token()
@@ -108,7 +130,7 @@ def create_user():
         "appearanceId": "",
         "jingle": "",
         "rollingPoints": 0,
-        "badge": None
+        "badge": None,
     }
     sessions[token] = {"session_id": session_id, "user_id": user_id}
     return json_response({"session_id": session_id, "mgi_token": token})
@@ -129,7 +151,7 @@ def browse():
     start = int(request.args.get("start_idx", 0))
     max_results = int(request.args.get("max_results", 20))
     game_list = []
-    for gid, g in list(games.items())[start:start+max_results]:
+    for gid, g in list(games.items())[start:start + max_results]:
         game_list.append(build_game_session_info(gid, g))
     return json_response({"games": game_list})
 
@@ -144,7 +166,7 @@ def game_info(game_id):
 
 @app.route("/game/<game_id>/round/<round_id>", methods=["GET"])
 def round_info(game_id, round_id):
-    # Same as game_info but we overwrite roundId later
+    # Same as game_info but we overwrite roundId later.
     resp = game_info(game_id)          # reuse the same logic
     data = resp.get_json()
     if data and data.get("games"):
@@ -158,7 +180,7 @@ def build_game_session_info(game_id, game_data):
         "id": game_id,
         "srv": {
             "users": len(game_data.get("users", set())),
-            "cap": config.get("capacity", 2)
+            "cap": config.get("capacity", 2),
         },
         "fields": [],
         "enableAI": config.get("enableAI", False),
@@ -192,7 +214,7 @@ def build_game_session_info(game_id, game_data):
         "masterIsVerified":False,
         "isPrivate": config.get("isPrivate", False),
         "forceSimPhysics": config.get("forceSimPhysics", False),
-        "allowCustomSetups": config.get("allowCustomSetups", False)
+        "allowCustomSetups": config.get("allowCustomSetups", False),
     }
 
 # ----------------------------------------------------------------------
@@ -304,7 +326,7 @@ def get_user(user_id):
             "appearanceId": "",
             "jingle": "",
             "rollingPoints": 0,
-            "badge": None
+            "badge": None,
         }
     else:
         u = users[user_id]
@@ -320,7 +342,7 @@ def get_user(user_id):
         "appearanceId": u.get("appearanceId", ""),
         "jingle": u.get("jingle", ""),
         "rollingPoints": int(u.get("rollingPoints", 0)),
-        "badge": u.get("badge", None)
+        "badge": u.get("badge", None),
     }
     return json_response(resp)
 
@@ -346,7 +368,7 @@ def set_user_info():
             "appearanceId": "",
             "jingle": "",
             "rollingPoints": 0,
-            "badge": None
+            "badge": None,
         }
         users[user_id].update(cfg)
     return json_response({})
@@ -418,7 +440,7 @@ def leaderboard_query(lb_name, kind):
     start = int(request.args.get("start_at", 0))
     cnt   = int(request.args.get("count", 0))
     entries = leaderboards.get(lb_name, [])
-    sliced  = entries[start:start+cnt]
+    sliced  = entries[start:start + cnt]
     return json_response({"entries": sliced, "total": len(entries)})
 
 @app.route("/leaderboard", methods=["POST"])
@@ -488,5 +510,6 @@ if __name__ == "__main__":
     # When running locally you can still use `python app.py`
     # Railway will invoke the Procfile (see below) which uses gunicorn.
     port = int(os.environ.get("PORT", 8000))
+    # Use INFO level so request/response logs appear in Railway logs
     app.logger.setLevel("INFO")
     app.run(host="0.0.0.0", port=port, debug=False)
