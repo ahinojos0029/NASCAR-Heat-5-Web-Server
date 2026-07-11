@@ -393,20 +393,43 @@ async def create_game(
 
 @app.get("/game")
 async def list_games(
+    request: Request,
     start_idx: int = 0,
     max_results: int = 200,
     category: str = ""
 ):
+    # Get query parameters
+    query_params = dict(request.query_params)
+    requested_fields = query_params.getlist('val') if hasattr(query_params, 'getlist') else query_params.get('val', [])
+    if isinstance(requested_fields, str):
+        requested_fields = [requested_fields]
+
     filtered = {
         gid: g
         for gid, g in games.items()
         if not category or g.get("trnclass") == category
     }
 
-    result = [
-        build_game_response(gid, filtered[gid])
-        for gid in filtered
-    ]
+    result = []
+    for gid, g in filtered.items():
+        game_response = build_game_response(gid, g)
+
+        # If specific fields were requested, filter the response
+        if requested_fields and len(requested_fields) > 0:
+            filtered_response = {"id": gid}  # Always include ID
+            for field in requested_fields:
+                if field in game_response:
+                    filtered_response[field] = game_response[field]
+                # Handle nested fields like s.master_user_id
+                elif '.' in field:
+                    parts = field.split('.')
+                    if len(parts) == 2 and parts[0] in game_response and parts[1] in game_response[parts[0]]:
+                        if parts[0] not in filtered_response:
+                            filtered_response[parts[0]] = {}
+                        filtered_response[parts[0]][parts[1]] = game_response[parts[0]][parts[1]]
+            result.append(filtered_response)
+        else:
+            result.append(game_response)
 
     paged = result[start_idx:start_idx + max_results]
 
@@ -540,25 +563,217 @@ async def leaderboard_get(name: str, kind: str, start_at: int = 0, count: int = 
 # ---------------- CHALLENGES ----------------
 @app.get("/challenge/list")
 async def challenge_list(limit: int = 6, published: str = "yes", full: str = "yes"):
-    return resp({"total_results": 0, "start_idx": 0, "max_results": limit, "challenges": []})
+    # Return some sample challenges
+    challenges = [
+        {
+            "id": "challenge_001",
+            "name": "Win 3 Races",
+            "description": "Win 3 races in any mode",
+            "icon": "win_races",
+            "progress": 0,
+            "target": 3,
+            "reward": {
+                "currency": 500,
+                "xp": 250
+            },
+            "isDaily": True,
+            "isWeekly": False,
+            "isActive": True
+        },
+        {
+            "id": "challenge_002",
+            "name": "Lead a Lap",
+            "description": "Lead at least one lap in a race",
+            "icon": "lead_lap",
+            "progress": 0,
+            "target": 1,
+            "reward": {
+                "currency": 300,
+                "xp": 150
+            },
+            "isDaily": True,
+            "isWeekly": False,
+            "isActive": True
+        },
+        {
+            "id": "challenge_003",
+            "name": "Podium Finisher",
+            "description": "Finish in the top 3 in 5 races",
+            "icon": "top_three",
+            "progress": 0,
+            "target": 5,
+            "reward": {
+                "currency": 1000,
+                "xp": 500
+            },
+            "isDaily": False,
+            "isWeekly": True,
+            "isActive": True
+        }
+    ]
+
+    # Filter by published status if needed
+    if published.lower() == "no":
+        challenges = [c for c in challenges if not c["isActive"]]
+
+    # Limit results
+    limited_challenges = challenges[:limit] if len(challenges) > limit else challenges
+
+    return resp({
+        "total_results": len(challenges),
+        "start_idx": 0,
+        "max_results": limit,
+        "challenges": limited_challenges,
+    })
 
 # ---------------- NEWSFEED ----------------
 @app.get("/newsfeed/list")
 async def newsfeed():
-    return resp({"items": []})
+    # Return some sample news items
+    news_items = [
+        {
+            "id": "news_001",
+            "header": "Welcome to NASCAR Heat 5 Online!",
+            "hasImage": False,
+            "priority": 1,
+            "expiryDate": int(time.time()) + 86400 * 30,  # 30 days from now
+            "sortedDate": int(time.time()),
+            "type": "announcement",
+            "link": ""
+        },
+        {
+            "id": "news_002",
+            "header": "New Weekend Event: Daytona Duel",
+            "hasImage": False,
+            "priority": 2,
+            "expiryDate": int(time.time()) + 86400 * 7,  # 7 days from now
+            "sortedDate": int(time.time()) - 86400,  # Yesterday
+            "type": "event",
+            "link": "/event/daytona_duel"
+        }
+    ]
+
+    return resp({
+        "items": news_items,
+        "version": "1.0"
+    })
 
 # ---------------- STATS ----------------
 @app.get("/stats")
 async def stats(category: str = ""):
-    return resp({"category": category, "stats": []})
+    # Return some sample stats based on category
+    stats_data = []
+
+    if category == "" or category == "N2020" or category == "general":
+        stats_data = [
+            {
+                "statId": "total_races",
+                "name": "Total Races",
+                "value": 1250,
+                "format": "integer"
+            },
+            {
+                "statId": "wins",
+                "name": "Wins",
+                "value": 85,
+                "format": "integer"
+            },
+            {
+                "statId": "top_tens",
+                "name": "Top 10 Finishes",
+                "value": 320,
+                "format": "integer"
+            },
+            {
+                "statId": "poles",
+                "name": "Pole Positions",
+                "value": 12,
+                "format": "integer"
+            }
+        ]
+    elif category == "N2022":
+        stats_data = [
+            {
+                "statId": "total_races",
+                "name": "Total Races (2022)",
+                "value": 420,
+                "format": "integer"
+            },
+            {
+                "statId": "wins",
+                "name": "Wins (2022)",
+                "value": 28,
+                "format": "integer"
+            }
+        ]
+
+    return resp({
+        "category": category if category else "N2020",
+        "stats": stats_data,
+    })
 
 # ---------------- TOURNAMENT ----------------
 @app.get("/tournament/event_info/{release}/unified")
 async def tournament_info(release: str):
+    # Return some sample events based on the release
+    events = []
+    if release == "release-CUP":
+        events = [
+            {
+                "eventId": "event_cup_001",
+                "eventName": "Daytona 500 Qualifiers",
+                "startTime": int(time.time()) - 86400,  # Yesterday
+                "endTime": int(time.time()) + 86400 * 7,  # Next week
+                "rewardId": "reward_cup_001",
+                "isActive": True
+            },
+            {
+                "eventId": "event_cup_002",
+                "eventName": "Talladega Challenge",
+                "startTime": int(time.time()) + 86400 * 2,  # In 2 days
+                "endTime": int(time.time()) + 86400 * 9,  # Next week + 2 days
+                "rewardId": "reward_cup_002",
+                "isActive": False
+            }
+        ]
+    elif release == "release-XFINITY":
+        events = [
+            {
+                "eventId": "event_xfinity_001",
+                "eventName": "Xfinity Series Opener",
+                "startTime": int(time.time()) - 86400 * 2,
+                "endTime": int(time.time()) + 86400 * 5,
+                "rewardId": "reward_xfinity_001",
+                "isActive": True
+            }
+        ]
+    elif release == "release-TRUCK":
+        events = [
+            {
+                "eventId": "event_truck_001",
+                "eventName": "Truck Series Heat",
+                "startTime": int(time.time()) - 86400,
+                "endTime": int(time.time()) + 86400 * 3,
+                "rewardId": "reward_truck_001",
+                "isActive": True
+            }
+        ]
+    elif release == "release-DIRT":
+        events = [
+            {
+                "eventId": "event_dirt_001",
+                "eventName": "Dirt Track Derby",
+                "startTime": int(time.time()) - 86400 * 3,
+                "endTime": int(time.time()) + 86400 * 4,
+                "rewardId": "reward_dirt_001",
+                "isActive": True
+            }
+        ]
+
     return resp({
-        "release":   release,
-        "active":    [],
-        "upcoming":  [],
-        "completed": [],
-        "events":    [],
+        "release": release,
+        "active": [e for e in events if e["isActive"]],
+        "upcoming": [e for e in events if not e["isActive"] and e["startTime"] > int(time.time())],
+        "completed": [e for e in events if not e["isActive"] and e["endTime"] < int(time.time())],
+        "events": events,
     })
