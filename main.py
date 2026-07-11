@@ -253,29 +253,13 @@ def get_token_or_403(mgi_bearer_token: str):
 @app.get("/auth")
 @app.post("/auth")
 async def auth(request: Request, mgi_bearer_token: str = Header(None, alias="mgi-bearer-token")):
-    # ONLY place where tokens are created
-    if not mgi_bearer_token or mgi_bearer_token.lower() in ["invalid", "none", ""]:
-        token = str(uuid.uuid4())
+    # Validate token - return EmptyResponse ({}) for valid tokens to match Expected EmptyResponse
+    if mgi_bearer_token and mgi_bearer_token not in ["invalid", "none", "null", "", "undefined"] and mgi_bearer_token in tokens:
+        # Valid token - return empty JSON object for EmptyResponse deserialization
+        return raw_json({})
     else:
-        token = mgi_bearer_token
-
-    if token not in tokens:
-        session_id = str(uuid.uuid4())
-        users[session_id] = {"created": time.time()}
-        tokens[token] = session_id
-
-    session_id = tokens[token]
-
-    return raw_json({
-        "session_id": session_id,
-        "mgi_token": token,
-        "backend": {
-            "mpidx": 0,
-            "ip": LOCAL_IP,
-            "cipher": {"key": "localdevkey", "iv": "localiv"},
-            "isn": {"send": 1, "recv": 1}
-        }
-    })
+        # Invalid or missing token - return error to trigger proper auth flow via /user endpoint
+        return raw_json({"error": "invalid_token"}, 401)
 
 @app.post("/user")
 async def create_user(request: Request):
@@ -291,6 +275,7 @@ async def create_user(request: Request):
         client_version=req.get("client_version", ""),
     )
 
+    # Return UserSessionCreateResponse format
     return resp({
         "session_id": session_id,
         "mgi_token": token
@@ -312,9 +297,7 @@ async def get_user(user_id: str):
 
 @app.post("/user/config")
 async def user_config(request: Request):
-    return resp({
-        "status": "saved"
-    })
+    return resp({})
 
 # ---------------- GAME ----------------
 @app.post("/game")
@@ -531,11 +514,12 @@ async def leave_game(
     if session in g["players"]:
         g["players"].remove(session)
 
-    return resp({"left": True, "backend": generate_backend(0)})
+    # Return EmptyResponse for LeaveGameSession
+    return resp({})
 
 @app.post("/game/{game_id}/round/{round_id}/score")
 async def post_score(game_id: str, round_id: str, request: Request):
-    return resp({"status": "score_received"})
+    return resp({})
 
 # ---------------- LEADERBOARD ----------------
 @app.post("/leaderboard")
@@ -547,7 +531,21 @@ async def leaderboard_post(request: Request):
         leaderboards[board] = []
     leaderboards[board].append(score)
     leaderboards[board].sort(reverse=True)
-    return resp({"status": "posted"})
+
+    # Return LeaderboardQueryResponse format
+    scores = leaderboards.get(board, [])
+    entries = [
+        {"rank": i + 1, "score": score, "user": "player"}
+        for i, score in enumerate(scores)
+    ]
+    return resp({
+        "name": board,
+        "kind": "default",  # or could extract from req?
+        "start_at": 0,
+        "count": len(entries),
+        "total_results": len(scores),
+        "entries": entries,
+    })
 
 @app.get("/leaderboard/{name}/{kind}")
 async def leaderboard_get(name: str, kind: str, start_at: int = 0, count: int = 10):
@@ -715,6 +713,88 @@ async def stats(category: str = ""):
     return resp({
         "category": category if category else "N2020",
         "stats": stats_data,
+    })
+
+# ---------------- LEADERBOARD (continued) ----------------
+@app.post("/leaderboard/advance_time")
+async def advance_leaderboard_time(request: Request, mgi_bearer_token: str = Header(None, alias="mgi-bearer-token")):
+    # Handle token similar to auth endpoint: treat invalid/placeholder tokens as requests for new sessions
+    if not mgi_bearer_token or mgi_bearer_token.lower() in ["invalid", "none", ""]:
+        token = str(uuid.uuid4())
+    else:
+        token = mgi_bearer_token
+
+    if token not in tokens:
+        session_id = str(uuid.uuid4())
+        users[session_id] = {"created": time.time()}
+        tokens[token] = session_id
+
+    # For advance_time, we don't actually implement the logic, just return empty LeaderboardQueryResponse
+    # In a real implementation, this would advance the timer for time-based leaderboards
+    return resp({
+        "name": "",
+        "kind": "",
+        "start_at": 0,
+        "count": 0,
+        "total_results": 0,
+        "entries": []
+    })
+
+# ---------------- CHALLENGES (continued) ----------------
+@app.get("/challenge/leaderboard/{assists_level}")
+async def get_challenge_leaderboard(assists_level: str, mgi_bearer_token: str = Header(None, alias="mgi-bearer-token")):
+    # Handle token similar to auth endpoint: treat invalid/placeholder tokens as requests for new sessions
+    if not mgi_bearer_token or mgi_bearer_token.lower() in ["invalid", "none", ""]:
+        token = str(uuid.uuid4())
+    else:
+        token = mgi_bearer_token
+
+    if token not in tokens:
+        session_id = str(uuid.uuid4())
+        users[session_id] = {"created": time.time()}
+        tokens[token] = session_id
+
+    # Return mock challenge leaderboard data
+    return resp({
+        "total_results": 1,
+        "start_idx": 0,
+        "max_results": 1,
+        "leaderboard": [{
+            "rank": 1,
+            "score": 1000,
+            "user": "test_player",
+            "time": int(time.time())
+        }]
+    })
+
+@app.post("/challenge/completed/{challenge_id}")
+async def post_challenge_leaderboard(challenge_id: str, request: Request, mgi_bearer_token: str = Header(None, alias="mgi-bearer-token")):
+    # Handle token similar to auth endpoint: treat invalid/placeholder tokens as requests for new sessions
+    if not mgi_bearer_token or mgi_bearer_token.lower() in ["invalid", "none", ""]:
+        token = str(uuid.uuid4())
+    else:
+        token = mgi_bearer_token
+
+    if token not in tokens:
+        session_id = str(uuid.uuid4())
+        users[session_id] = {"created": time.time()}
+        tokens[token] = session_id
+
+    req = await parse_body(request)
+    score = req.get("score", 0.0)
+
+    # In a real implementation, we would store the score
+    # For now, just return success response
+    return resp({
+        "total_results": 1,
+        "start_idx": 0,
+        "max_results": 1,
+        "leaderboard": [{
+            "rank": 1,
+            "score": score,
+            "user": "test_player",
+            "time": int(time.time())
+        }]
     })
 
 # ---------------- TOURNAMENT ----------------
