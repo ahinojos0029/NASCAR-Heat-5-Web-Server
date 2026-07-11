@@ -121,7 +121,7 @@ def build_game_response(gid, g, viewer_session=None):
         "master_name": g.get("s.master_name", "host"),
         "master_is_verified": g.get("s.master_is_verified", True),
         "platform_session_id": g.get("s.platform_session_id", ""),
-        "s.platform_correlation_id": g.get("s.platform_correlation_id", ""),
+        "platform_correlation_id": g.get("s.platform_correlation_id", ""),
         "driving_backwards_rule": g.get("s.driving_backwards_rule", False),
         "state": g.get("s.state", "lobby"),  # string: "lobby", "load_and_sync", "racing", "postrace"
         "friendly_state": g.get("s.friendly_state", "LOBBY"),
@@ -146,8 +146,8 @@ def build_game_response(gid, g, viewer_session=None):
         "id": gid,
         "s": s_obj,
         "c": c_obj,
-        "enable_ai": g.get("enable_ai", False),
-        "enable_chat": g.get("enable_chat", True),
+        "enable_ai": bool_val(g.get("enable_ai", False)),
+        "enable_chat": bool_val(g.get("enable_chat", True)),
         "num_laps": g.get("num_laps", 10),
         "league": g.get("league", "CUP"),
         "flags": g.get("flags", "NONE"),  # string
@@ -364,15 +364,15 @@ async def create_game(
         "c.allow_custom_setups": cfg.get("allow_custom_setups", False),
 
         # Top-level game fields
-        "enable_ai": cfg.get("enable_ai", False),
-        "enable_chat": cfg.get("enable_chat", True),
+        "enable_ai": bool_val(cfg.get("enable_ai", False)),
+        "enable_chat": bool_val(cfg.get("enable_chat", True)),
         "num_laps": cfg.get("num_laps", 10),
         "league": cfg.get("league", "CUP"),
         "flags": cfg.get("flags", "NONE"),  # string
+        "draft_influence": cfg.get("draft_influence", "MEDIUM"),  # string
         "stage_cfg": cfg.get("stage_cfg", [25, 25, 50]),  # list, will be JSON serialized in build_game_response
         "race_length": cfg.get("race_length", "LONG"),  # string
         "wear_factor": cfg.get("wear_factor", "NORMAL"),  # string
-        "draft_influence": cfg.get("draft_influence", "MEDIUM"),  # string
         "event_id": serialize_id({"id": str(uuid.uuid4())}),  # Base64-encoded JSON
         "event_set_id": serialize_id({"id": str(uuid.uuid4())}), # Base64-encoded JSON
         "session_type": cfg.get("session_type", "NORMAL"),
