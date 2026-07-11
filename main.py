@@ -46,6 +46,11 @@ async def log_requests(request: Request, call_next):
 
     headers = dict(response.headers)
 
+    # Add CORS headers for UnityWebRequest
+    headers["Access-Control-Allow-Origin"] = "*"
+    headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+    headers["Access-Control-Allow-Headers"] = "*"
+
     headers["ACTUAL-STATUS-CODE"] = str(response.status_code)
     headers["Content-Length"] = str(len(body))
     headers["Connection"] = "close"
