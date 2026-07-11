@@ -1,19 +1,13 @@
-# app.py – NASCAR Heat 5 web‑service emulator
-# --------------------------------------------------------------
-# * Returns proper JSON with correct Content‑Type for every endpoint
-# * Never falls back to Flask’s HTML error pages (404/405/500 → JSON)
-# * /auth always replies 200 {} (the game only needs a successful call)
-# * Includes request/response logging to help you debug further issues
-# --------------------------------------------------------------
-
+# app.py
 import json
+import os
 import uuid
-from flask import Flask, request, jsonify, abort, make_response
+from flask import Flask, request, jsonify, abort
 
 app = Flask(__name__)
 
 # ----------------------------------------------------------------------
-# In‑memory stores
+# In‑memory stores (same as before)
 # ----------------------------------------------------------------------
 sessions = {}          # token -> {"session_id": str, "user_id": str}
 users   = {}           # user_id -> dict with user fields
@@ -56,12 +50,12 @@ def require_auth():
     return sessions[token]   # {"session_id":…, "user_id":…}
 
 # ----------------------------------------------------------------------
-# Request / Response logging (helps you see what the game is doing)
+# Request / Response logging (helps you debug while on Railway)
 # ----------------------------------------------------------------------
 @app.before_request
 def log_request_info():
     body = request.get_data()
-    body_preview = body[:200].decode('utf‑8', errors='replace') if body else ''
+    body_preview = body[:200].decode('utf-8', errors='replace') if body else ''
     app.logger.debug(
         ">>> %s %s\nHeaders: %s\nBody (%d bytes): %s",
         request.method, request.path,
@@ -72,7 +66,7 @@ def log_request_info():
 @app.after_request
 def log_response_info(response):
     data = response.get_data()
-    data_preview = data[:200].decode('utf‑8', errors='replace') if data else ''
+    data_preview = data[:200].decode('utf-8', errors='replace') if data else ''
     app.logger.debug(
         "<<< %s %s\nHeaders: %s\nBody (%d bytes): %s",
         response.status, response.status_code,
@@ -98,10 +92,6 @@ def json_error(e):
 # ----------------------------------------------------------------------
 @app.route("/user", methods=["POST"])
 def create_user():
-    """
-    Request: UserSessionCreateResponse
-    Response: { "session_id": "...", "mgi_token": "..." }
-    """
     _ = request.get_json(silent=True) or {}
     user_id = make_user_id()
     token   = make_token()
@@ -127,7 +117,7 @@ def create_user():
 def auth():
     """
     The game only needs a successful 200 response.
-    We ignore the token validity here – always return {}.
+    We ignore the token here – always return {}.
     """
     return json_response({})   # EmptyResponse
 
@@ -146,7 +136,6 @@ def browse():
 @app.route("/game/<game_id>", methods=["GET"])
 def game_info(game_id):
     if game_id not in games:
-        # Return a stub so we don't 404 – the client can handle zero users.
         gid = game_id
         g   = {"config": {}, "users": set()}
     else:
@@ -155,13 +144,13 @@ def game_info(game_id):
 
 @app.route("/game/<game_id>/round/<round_id>", methods=["GET"])
 def round_info(game_id, round_id):
-    # Same as game_info but we overwrite the roundId later.
+    # Same as game_info but we overwrite roundId later
     resp = game_info(game_id)          # reuse the same logic
     data = resp.get_json()
     if data and data.get("games"):
         data["games"][0]["roundId"] = str(round_id)
         return json_response(data)
-    return resp   # fallback (should never happen)
+    return resp   # fallback (should never hit)
 
 def build_game_session_info(game_id, game_data):
     config = game_data.get("config", {})
@@ -410,8 +399,7 @@ def newsfeed_item(item_id):
     for item in newsfeed_items:
         if item["id"] == item_id:
             return json_response(item)
-    # If not found, still return JSON (404) – Unity will treat it as an error,
-    # but at least it won’t receive an HTML page.
+    # Not found – still return JSON (400/404 would be HTML otherwise)
     return jsonify({"error": "not found"}), 404
 
 # ----------------------------------------------------------------------
@@ -419,7 +407,7 @@ def newsfeed_item(item_id):
 # ----------------------------------------------------------------------
 @app.route("/analytics/postrace", methods=["POST"])
 def post_race_analytics():
-    _ = request.get_json(silent=True) or ()
+    _ = request.get_json(silent=True) or {}
     return json_response({})
 
 # ----------------------------------------------------------------------
@@ -444,7 +432,7 @@ def leaderboard_post():
 
 @app.route("/leaderboard/advance_time", methods=["POST"])
 def advance_leaderboard_time():
-    _ = request.get_json(silent=True) or ()
+    _ = request.get_json(silent=True) or {}
     return json_response({"entries": [], "total": 0})
 
 # ----------------------------------------------------------------------
@@ -494,10 +482,11 @@ def post_challenge_leaderboard(challenge_id):
     return json_response({"entries": []})
 
 # ----------------------------------------------------------------------
-# RUN
+# RUN – read PORT from the environment (Railway sets $PORT)
 # ----------------------------------------------------------------------
 if __name__ == "__main__":
-    # Enable debug logging so you can see the request/response flow.
-    app.logger.setLevel("DEBUG")
-    # Use threaded=True so multiple game requests can be handled concurrently.
-    app.run(host="0.0.0.0", port=8000, debug=True, threaded=True)
+    # When running locally you can still use `python app.py`
+    # Railway will invoke the Procfile (see below) which uses gunicorn.
+    port = int(os.environ.get("PORT", 8000))
+    app.logger.setLevel("INFO")
+    app.run(host="0.0.0.0", port=port, debug=False)
