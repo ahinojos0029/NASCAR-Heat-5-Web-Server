@@ -1,107 +1,126 @@
-# app.py
+# app.py – functional NASCAR Heat 5 web‑service emulator
+# ------------------------------------------------------
+#   * Returns proper JSON with correct Content‑Type for every endpoint
+#   * Never falls back to Flask’s HTML error pages (404/405/500 → JSON)
+#   * /auth always replies 200 {} (the game only needs a successful call)
+#   * Includes request/response logging to help you debug further issues
+# ------------------------------------------------------
+
 import json
 import uuid
-from flask import Flask, request, jsonify, abort
+from flask import Flask, request, jsonify, abort, make_response
 
 app = Flask(__name__)
 
-# --------------------------------------------------------------
-# In‑memory stores
-# --------------------------------------------------------------
-# token -> {"session_id": str, "user_id": str}
-sessions = {}
-
-# user_id -> dict with user‑config fields (appearanceId, basePersonaId, jingle, rollingPoints, ...)
-users = {}
-
-# game_id -> {
-#     "config": dict,               # from GameSessionCreateRequest / SetGameInfo
-#     "users": set of user_id,      # players presently in the session
-#     "reservations": int,          # from /reservation endpoint
-#     "scores": dict round_id -> list of {lapData, raceTimeData}
-# }
-games = {}
-
-# leaderboard_name -> list of entries (each entry is a dict)
+# ----------------------------------------------------------------------
+# In‑memory stores (same as before)
+# ----------------------------------------------------------------------
+sessions = {}          # token -> {"session_id": str, "user_id": str}
+users   = {}           # user_id -> dict with user fields
+games   = {}           # game_id -> {"config":{}, "users":set(), "reservations":int, "scores":{}}
 leaderboards = {}
+newsfeed_items = [{
+    "id": 1,
+    "title": "Welcome to NASCAR Heat 5",
+    "body": "Enjoy the races!",
+    "timestamp": 0,
+    "type": 0,
+    "imageUrl": "",
+    "linkUrl": ""
+}]
+tournament_events = []
+tournament_history = []
+challenges = []
+stats_values = {}
 
-# simple static data for newsfeed, tournaments, challenges, stats
-newsfeed_items = [
-    {
-        "id": 1,
-        "title": "Welcome to NASCAR Heat 5",
-        "body": "Enjoy the races!",
-        "timestamp": 0,
-        "type": 0,
-        "imageUrl": "",
-        "linkUrl": ""
-    }
-]
-
-tournament_events = []   # list of TRNEventInfoResponse objects
-tournament_history = []  # list of TRNHistory objects (we just store raw dicts)
-
-challenges = []          # list of challenge dicts (filled lazily if needed)
-
-stats_values = {}        # category -> dict of values
-
-# --------------------------------------------------------------
+# ----------------------------------------------------------------------
 # Helper functions
-# --------------------------------------------------------------
-def make_token():
-    """Generate a unique bearer token."""
-    return str(uuid.uuid4())
-
-def make_session_id():
-    return str(uuid.uuid4())
-
-def make_user_id():
-    return str(uuid.uuid4())
-
-def make_game_id():
-    return f"game_{len(games) + 1}"
+# ----------------------------------------------------------------------
+def make_token():    return str(uuid.uuid4())
+def make_session_id(): return str(uuid.uuid4())
+def make_user_id():    return str(uuid.uuid4())
+def make_game_id():    return f"game_{len(games) + 1}"
 
 def json_response(data, status=200):
-    """Utility to always return proper JSON + content‑type."""
+    """Always return JSON + correct content‑type."""
     resp = jsonify(data)
     resp.status_code = status
     resp.headers["Content-Type"] = "application/json"
     return resp
 
 def require_auth():
-    """Validate MGI-Bearer-Token header; abort with 401 if missing/invalid."""
-    token = request.headers.get("MGI-Bearer-Token")
+    """Validate MGI‑Bearer‑Token; abort 401 if missing/invalid."""
+    token = request.headers.get("MGI‑Bearer‑Token")
     if token not in sessions:
         abort(401, description="Invalid or missing token")
-    return sessions[token]   # return the session dict (has user_id)
+    return sessions[token]   # returns {"session_id":…, "user_id":…}
 
-# --------------------------------------------------------------
+# ----------------------------------------------------------------------
+# Request / Response logging (helps you see what the game is doing)
+# ----------------------------------------------------------------------
+@app.before_request
+def log_request_info():
+    # Avoid logging the massive binary bodies of large uploads – just show length
+    body = request.get_data()
+    body_preview = body[:200].decode('utf‑8', errors='replace') if body else ''
+    app.logger.debug(
+        ">>> %s %s\nHeaders: %s\nBody (%d bytes): %s",
+        request.method, request.path,
+        dict(request.headers),
+        len(body), body_preview
+    )
+
+@app.after_request
+def log_response_info(response):
+    # Capture response body (but limit length for huge payloads)
+    data = response.get_data()
+    data_preview = data[:200].decode('utf‑8', errors='replace') if data else ''
+    app.logger.debug(
+        "<<< %s %s\nHeaders: %s\nBody (%d bytes): %s",
+        response.status, response.status_code,
+        dict(response.headers),
+        len(data), data_preview
+    )
+    return response
+
+# ----------------------------------------------------------------------
+# Generic JSON error handlers – never return HTML
+# ----------------------------------------------------------------------
+@app.errorhandler(400)
+def bad_request(e):
+    return json_response({"error": "bad request"}), 400
+@app.errorhandler(401)
+def unauthorized(e):
+    return json_response({"error": "unauthorized"}), 401
+@app.errorhandler(403)
+def forbidden(e):
+    return json_response({"error": "forbidden"}), 403
+@app.errorhandler(404)
+def not_found(e):
+    return json_response({"error": "not found"}), 404
+@app.errorhandler(405)
+def method_not_allowed(e):
+    return json_response({"error": "method not allowed"}), 405
+@app.errorhandler(500)
+def internal_error(e):
+    return json_response({"error": "internal server error"}), 500
+
+# ----------------------------------------------------------------------
 # AUTHENTICATION
-# --------------------------------------------------------------
+# ----------------------------------------------------------------------
 @app.route("/user", methods=["POST"])
 def create_user():
     """
-    Request: UserSessionCreateRequest
-    {
-        "platform": "...",
-        "auth_token": "...",   # ignored for emulator
-        "version": "...",
-        "client_version": "..."
-    }
-    Response: UserSessionCreateResponse
-    {
-        "session_id": "...",
-        "mgi_token": "..."
-    }
+    Request: UserSessionCreateResponse
+    Response: { "session_id": "...", "mgi_token": "..." }
     """
-    _ = request.get_json(silent=True) or {}   # we don't need to store the request fields
+    _ = request.get_json(silent=True) or {}
     user_id = make_user_id()
-    token = make_token()
+    token   = make_token()
     session_id = make_session_id()
-    # create a placeholder user entry (will be filled via /user/config)
     users[user_id] = {
         "userId": user_id,
-        "isLocalUser": True,   # the locally logged‑in user
+        "isLocalUser": True,
         "mpIdx": 0,
         "name": "Player",
         "platformUserId": "",
@@ -119,189 +138,136 @@ def create_user():
 @app.route("/auth", methods=["GET"])
 def auth():
     """
-    The game sends MGI-Bearer-Token; we just need to return 200 with an empty JSON object.
+    The game only needs a successful 200 response.
+    We ignore the token validity here – always return {}.
     """
-    token = request.headers.get("MGI-Bearer-Token")
-    if token not in sessions:
-        abort(401, description="Invalid token")
-    # EmptyResponse = {}
-    return json_response({})
+    return json_response({})   # EmptyResponse
 
-# --------------------------------------------------------------
+# ----------------------------------------------------------------------
 # BROWSE / SESSION LISTING
-# --------------------------------------------------------------
+# ----------------------------------------------------------------------
 @app.route("/game", methods=["GET"])
 def browse():
-    """
-    Query: start_idx, max_results, category, val (multiple – keys the client wants)
-    Response: BrowseResponse { "games": [ { GameSessionInfo ... } ] }
-    """
     start = int(request.args.get("start_idx", 0))
     max_results = int(request.args.get("max_results", 20))
-    # category and val are ignored for simplicity – we still return a sensible GameSessionInfo
-    # based on each game's stored config.
     game_list = []
     for gid, g in list(games.items())[start:start+max_results]:
-        info = build_game_session_info(gid, g)
-        game_list.append(info)
+        game_list.append(build_game_session_info(gid, g))
     return json_response({"games": game_list})
 
 @app.route("/game/<game_id>", methods=["GET"])
 def game_info(game_id):
-    """
-    Response: same as a single element inside BrowseResponse.games (wrapped in a "games" list).
-    """
     if game_id not in games:
-        abort(404, description="Game not found")
-    info = build_game_session_info(game_id, games[game_id])
-    return json_response({"games": [info]})
+        # If the game asks for an unknown ID we still return a valid
+        # GameSessionInfo with zero users – the client can handle it.
+        # This prevents a 404 that would be interpreted as a network error.
+        gid = game_id
+        g   = {"config": {}, "users": set()}
+    else:
+        gid, g = game_id, games[game_id]
+    return json_response({"games": [build_game_session_info(gid, g)]})
 
 @app.route("/game/<game_id>/round/<round_id>", methods=["GET"])
 def round_info(game_id, round_id):
-    """
-    The round‑info endpoint returns the same structure as a normal game info,
-    but with the roundId field set to the requested round_id.
-    """
-    if game_id not in games:
-        abort(404, description="Game not found")
-    info = build_game_session_info(game_id, games[game_id])
-    # Overwrite the roundId to the requested one (the game checks this)
-    info["roundId"] = round_id
-    return json_response({"games": [info]})
+    # Same as game_info but we overwrite the roundId later.
+    resp = game_info(game_id)          # reuse the same logic
+    data = resp.get_json()
+    if data and data.get("games"):
+        data["games"][0]["roundId"] = str(ring_id)  # ensure string
+        return json_response(data)
+    return resp   # fallback (should never hit)
 
 def build_game_session_info(game_id, game_data):
-    """
-    Construct a GameSessionInfo‑compatible dict from stored game data.
-    Only the fields that the client actually reads before joining are filled;
-    missing fields are given sensible defaults.
-    """
     config = game_data.get("config", {})
-    # Default values – can be overridden by config keys that match the names the game sends.
-    info = {
+    return {
         "id": game_id,
         "srv": {
             "users": len(game_data.get("users", set())),
             "cap": config.get("capacity", 2)
         },
-        "fields": [],  # the actual field parsing is done by the client using the key list; we leave it empty.
-        # Basic boolean / enum fields (ints matching the C# enums)
+        "fields": [],
         "enableAI": config.get("enableAI", False),
         "enableChat": config.get("enableChat", False),
-        "numLaps": config.get("numLaps", 0),
-        "league": config.get("league", 0),               # 0 = CUP
-        "flags": config.get("flags", 0),
-        "stageCfg": config.get("stageCfg", ""),
-        "state": "lobby",
-        "friendlyState": "Lobby",
-        "roundId": "",                                   # will be overridden by /round/<id> endpoint
-        "stateTimeout": 0,
-        "raceLength": 0,
-        "wearFactor": 0,
-        "draftInfluence": 0,
-        "eventId": "",                                   # empty = default EventId
-        "eventSetId": "",
-        "sessionType": 0,                                # 0 = PRIVATE (from NetGameSessionType)
-        "gameYear": 0,
+        "numLaps":    config.get("numLaps", 0),
+        "league":     config.get("league", 0),               # 0 = CUP
+        "flags":      config.get("flags", 0),
+        "stageCfg":   config.get("stageCfg", ""),
+        "state":      "lobby",
+        "friendlyState":"Lobby",
+        "roundId":    "",
+        "stateTimeout":0,
+        "raceLength":0,
+        "wearFactor":0,
+        "draftInfluence":0,
+        "eventId":"",
+        "eventSetId":"",
+        "sessionType":0,
+        "gameYear":0,
         "friendlyTrackName": config.get("friendlyTrackName", ""),
         "damage": config.get("damage", 0),
-        "purpose": "",
-        "liveDataInterval": 0,
-        "isProMode": False,
-        "minUsersForScoring": 0,
-        "trnclass": 0,
-        # String fields often accessed:
-        "platformSessionId": "",
-        "platformCorrelationId": "",
-        "masterUserId": "",
-        "masterName": "",
-        "masterIsVerified": False,
+        "purpose":"",
+        "liveDataInterval":0,
+        "isProMode":False,
+        "minUsersForScoring":0,
+        "trnclass":0,
+        "platformSessionId":"",
+        "platformCorrelationId":"",
+        "masterUserId":"",
+        "masterName":"",
+        "masterIsVerified":False,
         "isPrivate": config.get("isPrivate", False),
         "forceSimPhysics": config.get("forceSimPhysics", False),
         "allowCustomSetups": config.get("allowCustomSetups", False)
     }
-    return info
 
-# --------------------------------------------------------------
+# ----------------------------------------------------------------------
 # SESSION MANAGEMENT
-# --------------------------------------------------------------
+# ----------------------------------------------------------------------
 @app.route("/game/<game_id>/reservation", methods=["POST"])
 def reserve_slots(game_id):
-    """
-    Request: ReservationRequest { "count": <int> }
-    Response: ReservationResponse (empty – just 200)
-    """
     if game_id not in games:
-        abort(404, description="Game not found")
+        # create a placeholder so subsequent calls don’t 404
+        games[game_id] = {"config":{}, "users":set(), "reservations":0, "scores":{}}
     data = request.get_json(silent=True) or {}
     games[game_id]["reservations"] = data.get("count", 0)
     return json_response({})
 
 @app.route("/game", methods=["POST"])
 def create_game():
-    """
-    Request: GameSessionCreateRequest
-    {
-        "backend": {...},
-        "config": {...},
-        "category": "...",
-        "tid": {...}
-    }
-    Response: GameSessionCreateResponse { "id": "<new‑game‑id>" }
-    """
     data = request.get_json(silent=True) or {}
-    # We don't validate backend/tid for the emulator, just keep the config.
     gid = make_game_id()
     games[gid] = {
         "config": data.get("config", {}),
         "users": set(),
         "reservations": 0,
-        "scores": {}          # round_id -> list of score events
+        "scores": {}
     }
     return json_response({"id": gid})
 
 @app.route("/game/<game_id>/add_user", methods=["POST"])
 def add_user(game_id):
-    """
-    Request: JoinRequest { "reservation": "...", "trn_user_subgroup": "..." }
-    Response: JoinResponse (empty)
-    The user making the request is identified by the MGI-Bearer-Token header.
-    """
-    sess = require_auth()               # validates token and returns session dict
+    sess = require_auth()
     user_id = sess["user_id"]
     if game_id not in games:
-        abort(404, description="Game not found")
+        games[game_id] = {"config":{}, "users":set(), "reservations":0, "scores":{}}
     games[game_id]["users"].add(user_id)
     return json_response({})
 
 @app.route("/game/<game_id>", methods=["POST"])
 def set_game_info(game_id):
-    """
-    Request: GameSessionConfigRequest { "config": {...} }
-    Response: EmptyResponse
-    """
     if game_id not in games:
-        abort(404, description="Game not found")
+        games[game_id] = {"config":{}, "users":set(), "reservations":0, "scores":{}}
     data = request.get_json(silent=True) or {}
-    # Merge the incoming config with existing (overwrite)
     games[game_id]["config"].update(data.get("config", {}))
     return json_response({})
 
 @app.route("/game/<game_id>/op/<op>", methods=["POST"])
 def game_op(game_id, op):
-    """
-    Request: EmptyRequest
-    Response: OperationResponse (empty)
-    """
     # No state change needed for the emulator
     return json_response({})
 
 @app.route("/game/<game_id>/del_user", methods=["POST"])
 def remove_user(game_id):
-    """
-    Request: LeaveRequest { "reason": "..." }
-    Response: EmptyResponse
-    The user leaving is the one identified by the auth token.
-    """
     sess = require_auth()
     user_id = sess["user_id"]
     if game_id in games:
@@ -310,31 +276,23 @@ def remove_user(game_id):
 
 @app.route("/game/<game_id>/del_user/<user_id>", methods=["POST"])
 def kick_user(game_id, user_id):
-    """
-    Request: EmptyRequest
-    Response: EmptyResponse
-    """
-    if game_id not in games:
-        abort(404, description="Game not found")
-    games[game_id]["users"].discard(user_id)
+    if game_id in games:
+        games[game_id]["users"].discard(user_id)
     return json_response({})
 
-# --------------------------------------------------------------
+# ----------------------------------------------------------------------
 # PLAYER INFO
-# --------------------------------------------------------------
+# ----------------------------------------------------------------------
 @app.route("/game/<game_id>/round/<round_id>/participants", methods=["GET"])
 def participants(game_id, round_id):
-    """
-    Response: UserSessionInfoList { "users": [ { UserSessionInfo ... } ] }
-    """
     if game_id not in games:
-        abort(404, description="Game not found")
-    sess = require_auth()   # we need the token to know which user is local
+        # Return an empty list – the client can handle it.
+        return json_response({"users": []})
+    sess = require_auth()
     local_user_id = sess["user_id"]
     user_list = []
     for idx, uid in enumerate(games[game_id]["users"]):
         u = users.get(uid, {})
-        # Build a UserSessionInfo‑compatible dict
         user_info = {
             "userId": uid,
             "isLocalUser": (uid == local_user_id),
@@ -354,20 +312,29 @@ def participants(game_id, round_id):
 
 @app.route("/game/<game_id>/users", methods=["GET"])
 def users_in_game(game_id):
-    """
-    Same as participants but without round context – we just reuse the same logic.
-    """
-    return participants(game_id, "0")   # round_id is irrelevant for this endpoint
+    # Same as participants – round_id is irrelevant here.
+    return participants(game_id, "0")
 
 @app.route("/user/<user_id>", methods=["GET"])
 def get_user(user_id):
-    """
-    Response: UserSessionInfo (many fields – we return what we have stored).
-    """
     if user_id not in users:
-        abort(404, description="User not found")
-    u = users[user_id]
-    # Ensure we return all expected fields with sensible defaults
+        # Return a minimal placeholder – prevents 404.
+        u = {
+            "userId": user_id,
+            "isLocalUser": False,
+            "mpIdx": 0,
+            "name": "Player",
+            "platformUserId": "",
+            "sortVal": 0.0,
+            "isVerified": False,
+            "basePersonaId": "",
+            "appearanceId": "",
+            "jingle": "",
+            "rollingPoints": 0,
+            "badge": None
+        }
+    else:
+        u = users[user_id]
     resp = {
         "userId": u.get("userId", user_id),
         "isLocalUser": u.get("isLocalUser", False),
@@ -386,21 +353,14 @@ def get_user(user_id):
 
 @app.route("/user/config", methods=["POST"])
 def set_user_info():
-    """
-    Request: UserSessionConfigRequest { "config": {...} }
-    Response: EmptyResponse
-    The config contains the fields the game sends when setting up a local user.
-    """
     sess = require_auth()
     user_id = sess["user_id"]
     data = request.get_json(silent=True) or {}
     cfg = data.get("config", {})
-    # Update the stored user dict with whatever fields the client sent.
-    # We keep the existing keys and just overlay the new values.
     if user_id in users:
         users[user_id].update(cfg)
     else:
-        # If for some reason the user didn't exist, create a minimal entry.
+        # create a stub if somehow missing
         users[user_id] = {
             "userId": user_id,
             "isLocalUser": True,
@@ -418,151 +378,103 @@ def set_user_info():
         users[user_id].update(cfg)
     return json_response({})
 
-# --------------------------------------------------------------
+# ----------------------------------------------------------------------
 # GAMEPLAY EVENTS (lap / race scores)
-# --------------------------------------------------------------
+# ----------------------------------------------------------------------
 @app.route("/game/<game_id>/round/<round_id>/score", methods=["POST"])
 def post_score_event(game_id, round_id):
-    """
-    Request: GameSessionScoreEvent (may contain LapData or RaceTimeData)
-    Response: EmptyResponse
-    We store the event so it can be queried later if the client ever asks for it.
-    """
     if game_id not in games:
-        abort(404, description="Game not found")
+        games[game_id] = {"config":{}, "users":set(), "reservations":0, "scores":{}}
     data = request.get_json(silent=True) or {}
     event = {
-        "lapData": data.get("data"),          # LapData object or None
-        "raceTimeData": data.get("racetime_data")  # RaceTimeData object or None
+        "lapData": data.get("data"),          # may be None
+        "raceTimeData": data.get("racetime_data")
     }
     games[game_id]["scores"].setdefault(round_id, []).append(event)
     return json_response({})
 
-# --------------------------------------------------------------
+# ----------------------------------------------------------------------
 # INVITATIONS
-# --------------------------------------------------------------
+# ----------------------------------------------------------------------
 @app.route("/invitation/consume", methods=["POST"])
 def consume_invitation():
-    """
-    Request: ConsumeInvitationRequest { "invitationId": "..." }
-    Response: EmptyResponse
-    """
     _ = request.get_json(silent=True) or {}
     return json_response({})
 
 @app.route("/invitation/send", methods=["POST"])
 def invite_bunch():
-    """
-    Request: MultipleInviteRequest { "platformSessionId": "...", "platformUserIds": [...] }
-    Response: EmptyResponse
-    """
     _ = request.get_json(silent=True) or {}
     return json_response({})
 
-# --------------------------------------------------------------
+# ----------------------------------------------------------------------
 # TELEMETRY
-# --------------------------------------------------------------
+# ----------------------------------------------------------------------
 @app.route("/info/connection", methods=["POST"])
 def report_connection():
-    """
-    Request: ConnectionInfoMessage
-    Response: EmptyResponse
-    """
     _ = request.get_json(silent=True) or {}
     return json_response({})
 
-# --------------------------------------------------------------
+# ----------------------------------------------------------------------
 # NEWS FEED
-# --------------------------------------------------------------
+# ----------------------------------------------------------------------
 @app.route("/newsfeed/list", methods=["GET"])
 def newsfeed_list():
-    """
-    Response: NewsfeedListResponse { "items": [ { NewsfeedItemResponse ... } ] }
-    """
     return json_response({"items": newsfeed_items})
 
 @app.route("/newsfeed/<int:item_id>", methods=["GET"])
 def newsfeed_item(item_id):
-    """
-    Response: NewsfeedItemResponse
-    """
     for item in newsfeed_items:
         if item["id"] == item_id:
             return json_response(item)
-    abort(404, description="Newsfeed item not found")
+    # If not found, return a 404 JSON (still valid JSON)
+    return json_response({"error": "not found"}), 404
 
-# --------------------------------------------------------------
+# ----------------------------------------------------------------------
 # ANALYTICS
-# --------------------------------------------------------------
+# ----------------------------------------------------------------------
 @app.route("/analytics/postrace", methods=["POST"])
 def post_race_analytics():
-    """
-    Request: PostRaceAnalyticsData
-    Response: EmptyResponse
-    """
     _ = request.get_json(silent=True) or {}
     return json_response({})
 
-# --------------------------------------------------------------
+# ----------------------------------------------------------------------
 # LEADERBOARDS
-# --------------------------------------------------------------
+# ----------------------------------------------------------------------
 @app.route("/leaderboard/<lb_name>/<kind>", methods=["GET"])
 def leaderboard_query(lb_name, kind):
-    """
-    Query: start_at, count
-    Response: LeaderboardQueryResponse { "entries": [...], "total": <int> }
-    """
     start = int(request.args.get("start_at", 0))
-    cnt = int(request.args.get("count", 0))
+    cnt   = int(request.args.get("count", 0))
     entries = leaderboards.get(lb_name, [])
-    sliced = entries[start:start+cnt]
+    sliced  = entries[start:start+cnt]
     return json_response({"entries": sliced, "total": len(entries)})
 
 @app.route("/leaderboard", methods=["POST"])
 def leaderboard_post():
-    """
-    Request: LeaderboardPostRequest { "posts": [LeaderboardPost, ...] }
-    Response: LeaderboardQueryResponse (same shape as GET)
-    """
     data = request.get_json(silent=True) or {}
     posts = data.get("posts", [])
-    # For simplicity we treat each post as a leaderboard entry and append to a generic leaderboard.
-    # In a real implementation you would look at the post's leaderboard name.
-    lb_name = "global"
+    lb_name = "global"               # simple fallback
     leaderboards.setdefault(lb_name, []).extend(posts)
-    return json_response({"entries": leaderboards[lb_name][-len(posts):], "total": len(leaderboards[lb_name])})
+    return json_response({"entries": leaderboards[lb_name][-len(posts):],
+                          "total": len(leaderboards[lb_name])})
 
 @app.route("/leaderboard/advance_time", methods=["POST"])
 def advance_leaderboard_time():
-    """
-    Request: LeaderboardAdvanceTimeRequest { "names": [...] }
-    Response: LeaderboardQueryResponse
-    """
     _ = request.get_json(silent=True) or {}
-    # No-op for the emulator; just return an empty list.
     return json_response({"entries": [], "total": 0})
 
-# --------------------------------------------------------------
+# ----------------------------------------------------------------------
 # STATS
-# --------------------------------------------------------------
+# ----------------------------------------------------------------------
 @app.route("/stats", methods=["GET"])
 def get_stats():
-    """
-    Query: category
-    Response: StatsResponse { "values": { ... } }
-    """
     category = request.args.get("category", "")
     return json_response({"values": stats_values.get(category, {})})
 
-# --------------------------------------------------------------
+# ----------------------------------------------------------------------
 # TOURNAMENT
-# --------------------------------------------------------------
+# ----------------------------------------------------------------------
 @app.route("/tournament/event_info/<adv>/<subgroup>", methods=["GET"])
 def tournament_event_info(adv, subgroup):
-    """
-    Response: TRNEventInfoResponse
-    """
-    # Return static dummy data; could be made dynamic if needed.
     dummy = {
         "eventId": "",
         "name": "Test Event",
@@ -577,42 +489,30 @@ def tournament_event_info(adv, subgroup):
 
 @app.route("/tournament/history/<adv>/<subgroup>", methods=["GET"])
 def tournament_history(adv, subgroup):
-    """
-    Response: TRNHistory (we just return an empty list – the wrapper expects a list)
-    """
+    # The wrapper expects a list; we return an empty list.
     return json_response([])
 
-# --------------------------------------------------------------
+# ----------------------------------------------------------------------
 # CHALLENGES
-# --------------------------------------------------------------
+# ----------------------------------------------------------------------
 @app.route("/challenge/list", methods=["GET"])
 def challenge_list():
-    """
-    Query: limit, published, full
-    Response: ChallengeListResponse { "challenges": [...] }
-    """
     return json_response({"challenges": challenges})
 
 @app.route("/challenge/leaderboard/<assists_level>", methods=["GET"])
 def challenge_leaderboard(assists_level):
-    """
-    Response: ChallengeLeaderboardResponse { "entries": [...] }
-    """
     return json_response({"entries": []})
 
 @app.route("/challenge/completed/<challenge_id>", methods=["POST"])
 def post_challenge_leaderboard(challenge_id):
-    """
-    Request: ChallengeLeaderboardPostRequest { "score": <float> }
-    Response: ChallengeLeaderboardResponse
-    """
     _ = request.get_json(silent=True) or {}
     return json_response({"entries": []})
 
-# --------------------------------------------------------------
+# ----------------------------------------------------------------------
 # RUN
-# --------------------------------------------------------------
+# ----------------------------------------------------------------------
 if __name__ == "__main__":
-    # Enable debug logging so you can see request/response details while testing.
+    # Enable debug logging so you can see the request/response flow.
     app.logger.setLevel("DEBUG")
-    app.run(host="0.0.0.0", port=8000, debug=True)
+    # Use threaded=True so multiple game requests can be handled concurrently.
+    app.run(host="0.0.0.0", port=8000, debug=True, threaded=True)
