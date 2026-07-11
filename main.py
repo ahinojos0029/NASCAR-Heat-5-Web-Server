@@ -6,6 +6,20 @@ import uuid
 import time
 import socket
 import json
+import base64
+
+def serialize_id(obj):
+    """Serialize an object to a base64-encoded JSON string (matches Unity's NgUtil.SerializeId)"""
+    json_str = json.dumps(obj, separators=(',', ':'))
+    return base64.b64encode(json_str.encode('utf-8')).decode('utf-8')
+
+def deserialize_id(b64_str):
+    """Deserialize a base64-encoded JSON string (matches Unity's NgUtil.DeserializeId)"""
+    try:
+        json_str = base64.b64decode(b64_str).decode('utf-8')
+        return json.loads(json_str)
+    except Exception:
+        return None
 
 def raw_json(data, status=200):
     body = json.dumps(data, separators=(",", ":")).encode("utf-8")
@@ -101,10 +115,53 @@ def build_game_response(gid, g, viewer_session=None):
     else:
         session_index = 0
 
-    return {
-        "id": gid,
+    # Build the s object (session fields)
+    s_obj = {
+        "master_user_id": g.get("s.master_user_id", ""),
+        "master_name": g.get("s.master_name", "host"),
+        "master_is_verified": g.get("s.master_is_verified", True),
+        "platform_session_id": g.get("s.platform_session_id", ""),
+        "s.platform_correlation_id": g.get("s.platform_correlation_id", ""),
+        "driving_backwards_rule": g.get("s.driving_backwards_rule", False),
+        "state": g.get("s.state", "lobby"),  # string: "lobby", "load_and_sync", "racing", "postrace"
+        "friendly_state": g.get("s.friendly_state", "LOBBY"),
+        "round_id": g.get("s.round_id", str(uuid.uuid4())),
+        "state_timeout": g.get("s.state_timeout", 0),
+        "livedata_interval": g.get("s.livedata_interval", 1000),
+        "is_pro_mode": g.get("s.is_pro_mode", False),
+        "min_users_for_scoring": g.get("s.min_users_for_scoring", 1),
+        "purpose": g.get("s.purpose", "RACE"),
+        "trnclass": g.get("s.trnclass", "N2020")
+    }
 
-        # 🔥 ADD THESE
+    # Build the c object (config fields)
+    c_obj = {
+        "is_private": g.get("c.is_private", False),
+        "force_sim_physics": g.get("c.force_sim_physics", False),
+        "allow_custom_setups": g.get("c.allow_custom_setups", False)
+    }
+
+    # Build the top-level game fields
+    game_obj = {
+        "id": gid,
+        "s": s_obj,
+        "c": c_obj,
+        "enable_ai": g.get("enable_ai", False),
+        "enable_chat": g.get("enable_chat", True),
+        "num_laps": g.get("num_laps", 10),
+        "league": g.get("league", "CUP"),
+        "flags": g.get("flags", "NONE"),  # string
+        "stage_cfg": json.dumps(g.get("stage_cfg", [25, 25, 50])),  # JSON string
+        "race_length": g.get("race_length", "LONG"),  # string
+        "wear_factor": g.get("wear_factor", "NORMAL"),  # string
+        "draft_influence": g.get("draft_influence", "MEDIUM"),  # string
+        "event_id": g.get("event_id", serialize_id({"id": str(uuid.uuid4())})),  # base64-encoded JSON
+        "event_set_id": g.get("event_set_id", serialize_id({"id": str(uuid.uuid4())})),  # base64-encoded JSON
+        "session_type": g.get("session_type", "NORMAL"),
+        "game_year": g.get("game_year", "PRESENT"),
+        "friendly_track_name": g.get("friendly_track_name", "Daytona"),
+        "damage": g.get("damage", "FULL"),
+        # Legacy fields from the original implementation (keep for compatibility)
         "num_users": len(players),
         "max_users": g.get("max_players", 20),
         "has_password": False,
@@ -112,52 +169,10 @@ def build_game_response(gid, g, viewer_session=None):
         "region": "us",
         "build": "1.0",
         "joinable": True,
-
-        "s": {
-            "master_user_id": g.get("master_user_id") or "",
-            "master_name": g.get("master_name") or "host",
-            "master_is_verified": g.get("master_is_verified", True),
-            "state": g.get("state", 0),
-            "friendly_state": g.get("friendly_state", "LOBBY"),
-            "round_id": g.get("round_id") or str(uuid.uuid4()),
-            "state_timeout": g.get("state_timeout", 0),
-            "platform_session_id": g.get("platform_session_id") or "",
-            "platform_correlation_id": g.get("platform_correlation_id") or "",
-            "driving_backwards_rule": g.get("driving_backwards_rule", False),
-            "trnclass": g.get("trnclass", "N2020"),
-            "purpose": g.get("purpose", "RACE"),
-            "livedata_interval": g.get("livedata_interval", 1000),
-            "is_pro_mode": g.get("is_pro_mode", False),
-            "min_users_for_scoring": g.get("min_users_for_scoring", 1),
-        },
-
-        "c": {
-            "is_private": g.get("is_private", False),
-            "force_sim_physics": g.get("force_sim_physics", False),
-            "allow_custom_setups": g.get("allow_custom_setups", False),
-        },
-
-        "race_length": g.get("race_length", 10),
-        "num_laps": g.get("num_laps", 10),
-        "wear_factor": g.get("wear_factor", 1.0),
-        "flags": g.get("flags", []),
-        "event_id": g.get("event_id", ""),
-        "event_set_id": g.get("event_set_id", ""),
-        "session_type": g.get("session_type", "NORMAL"),
-        "damage": g.get("damage", "FULL"),
-        "league": g.get("league", "CUP"),
-
-        # 🔥 SAFE DEFAULT
-        "stage_cfg": g.get("stage_cfg") or [25, 25, 50],
-
-        "enable_chat": g.get("enable_chat", True),
-        "enable_ai": g.get("enable_ai", False),
-        "friendly_track_name": g.get("friendly_track_name", "Daytona"),
-        "game_year": g.get("game_year", "PRESENT"),
-        "draft_influence": g.get("draft_influence", 1.0),
-
-        "backend": generate_backend(session_index),
+        "backend": generate_backend(session_index)
     }
+
+    return game_obj
 
 async def parse_body(request: Request):
     try:
@@ -197,6 +212,15 @@ def register_token(
             "name": name,
             "version": version,
             "client_version": client_version,
+            # User fields expected by Unity NGUtil.UserSessionInfo2NetGameUserInfo
+            "s.name": name,
+            "s.platform_user_id": "",  # We don't have platform-specific ID
+            "s.sort_val": 0.0,         # Default sort value (valid float)
+            "s.is_verified": False,    # Not verified by default
+            "user_driver": serialize_id({}),  # Empty PersonaId as base64 JSON
+            "appearance_id": serialize_id({}), # Empty CarAppearanceId as base64 JSON
+            "jingle": "",
+            "rolling_points": 0,
         }
 
         tokens[token] = session_id
@@ -301,25 +325,61 @@ async def create_game(
 
     req = await parse_body(request)
     cfg = req.get("config", {})
-    backend_cfg = req.get("backend", {})
+    # backend_cfg is not used currently
 
     game_id = str(uuid.uuid4())
 
+    # Generate default values for the game session
+    # We'll store the game data in the format expected by the new build_game_response
     g = {
-        "players": [session],
-        "max_players": backend_cfg.get("capacity", 20),
-        "state": 0,
-        "friendly_state": "LOBBY",
-        "round_id": str(uuid.uuid4()),
-        "race_length": cfg.get("race_length", 10),
+        # Session fields (with 's.' prefix)
+        "s.master_user_id": session,
+        "s.master_name": user.get("s.name", "player"),
+        "s.master_is_verified": True,
+        "s.platform_session_id": "",  # We don't have platform session ID
+        "s.platform_correlation_id": "", # We don't have platform correlation ID
+        "s.driving_backwards_rule": False, # Default to false
+        "s.state": "lobby",  # Start in lobby (string)
+        "s.friendly_state": "LOBBY",
+        "s.round_id": str(uuid.uuid4()),
+        "s.state_timeout": 0,
+        "s.livedata_interval": 1000,
+        "s.is_pro_mode": False,
+        "s.min_users_for_scoring": 1,
+        "s.purpose": "RACE",
+        "s.trnclass": cfg.get("trnclass", "N2020"),  # Tournament class from config
+
+        # Config fields (with 'c.' prefix)
+        "c.is_private": cfg.get("is_private", False),
+        "c.force_sim_physics": cfg.get("force_sim_physics", False),
+        "c.allow_custom_setups": cfg.get("allow_custom_setups", False),
+
+        # Top-level game fields
+        "enable_ai": cfg.get("enable_ai", False),
+        "enable_chat": cfg.get("enable_chat", True),
         "num_laps": cfg.get("num_laps", 10),
-        "master_user_id": session,
-        "master_name": user.get("name", "player"),
-        "master_is_verified": True,
+        "league": cfg.get("league", "CUP"),
+        "flags": cfg.get("flags", "NONE"),  # string
+        "stage_cfg": cfg.get("stage_cfg", [25, 25, 50]),  # list, will be JSON serialized in build_game_response
+        "race_length": cfg.get("race_length", "LONG"),  # string
+        "wear_factor": cfg.get("wear_factor", "NORMAL"),  # string
+        "draft_influence": cfg.get("draft_influence", "MEDIUM"),  # string
+        "event_id": serialize_id({"id": str(uuid.uuid4())}),  # Base64-encoded JSON
+        "event_set_id": serialize_id({"id": str(uuid.uuid4())}), # Base64-encoded JSON
+        "session_type": cfg.get("session_type", "NORMAL"),
+        "game_year": cfg.get("game_year", "PRESENT"),
+        "friendly_track_name": cfg.get("friendly_track_name", "Daytona"),
+        "damage": cfg.get("damage", "FULL"),
+        # Note: damage_mode is duplicate of damage in the Unity code? We'll set it the same.
+        "damage_mode": cfg.get("damage", "FULL"),
+        # Players and max_players
+        "players": [session],
+        "max_players": 20  # default, could be made configurable
     }
 
     games[game_id] = g
 
+    # For the response, we need to build the game response for the creator (viewer_session = session)
     return resp(build_game_response(game_id, g, viewer_session=session))
 
 @app.get("/game")
