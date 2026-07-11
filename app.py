@@ -1,10 +1,10 @@
-# app.py – functional NASCAR Heat 5 web‑service emulator
-# ------------------------------------------------------
-#   * Returns proper JSON with correct Content‑Type for every endpoint
-#   * Never falls back to Flask’s HTML error pages (404/405/500 → JSON)
-#   * /auth always replies 200 {} (the game only needs a successful call)
-#   * Includes request/response logging to help you debug further issues
-# ------------------------------------------------------
+# app.py – NASCAR Heat 5 web‑service emulator
+# --------------------------------------------------------------
+# * Returns proper JSON with correct Content‑Type for every endpoint
+# * Never falls back to Flask’s HTML error pages (404/405/500 → JSON)
+# * /auth always replies 200 {} (the game only needs a successful call)
+# * Includes request/response logging to help you debug further issues
+# --------------------------------------------------------------
 
 import json
 import uuid
@@ -13,7 +13,7 @@ from flask import Flask, request, jsonify, abort, make_response
 app = Flask(__name__)
 
 # ----------------------------------------------------------------------
-# In‑memory stores (same as before)
+# In‑memory stores
 # ----------------------------------------------------------------------
 sessions = {}          # token -> {"session_id": str, "user_id": str}
 users   = {}           # user_id -> dict with user fields
@@ -50,17 +50,16 @@ def json_response(data, status=200):
 
 def require_auth():
     """Validate MGI‑Bearer‑Token; abort 401 if missing/invalid."""
-    token = request.headers.get("MGI‑Bearer‑Token")
+    token = request.headers.get("MGI-Bearer-Token")
     if token not in sessions:
         abort(401, description="Invalid or missing token")
-    return sessions[token]   # returns {"session_id":…, "user_id":…}
+    return sessions[token]   # {"session_id":…, "user_id":…}
 
 # ----------------------------------------------------------------------
 # Request / Response logging (helps you see what the game is doing)
 # ----------------------------------------------------------------------
 @app.before_request
 def log_request_info():
-    # Avoid logging the massive binary bodies of large uploads – just show length
     body = request.get_data()
     body_preview = body[:200].decode('utf‑8', errors='replace') if body else ''
     app.logger.debug(
@@ -72,7 +71,6 @@ def log_request_info():
 
 @app.after_request
 def log_response_info(response):
-    # Capture response body (but limit length for huge payloads)
     data = response.get_data()
     data_preview = data[:200].decode('utf‑8', errors='replace') if data else ''
     app.logger.debug(
@@ -87,23 +85,13 @@ def log_response_info(response):
 # Generic JSON error handlers – never return HTML
 # ----------------------------------------------------------------------
 @app.errorhandler(400)
-def bad_request(e):
-    return json_response({"error": "bad request"}), 400
 @app.errorhandler(401)
-def unauthorized(e):
-    return json_response({"error": "unauthorized"}), 401
 @app.errorhandler(403)
-def forbidden(e):
-    return json_response({"error": "forbidden"}), 403
 @app.errorhandler(404)
-def not_found(e):
-    return json_response({"error": "not found"}), 404
 @app.errorhandler(405)
-def method_not_allowed(e):
-    return json_response({"error": "method not allowed"}), 405
 @app.errorhandler(500)
-def internal_error(e):
-    return json_response({"error": "internal server error"}), 500
+def json_error(e):
+    return jsonify({"error": str(e)}), getattr(e, "code", 500)
 
 # ----------------------------------------------------------------------
 # AUTHENTICATION
@@ -158,9 +146,7 @@ def browse():
 @app.route("/game/<game_id>", methods=["GET"])
 def game_info(game_id):
     if game_id not in games:
-        # If the game asks for an unknown ID we still return a valid
-        # GameSessionInfo with zero users – the client can handle it.
-        # This prevents a 404 that would be interpreted as a network error.
+        # Return a stub so we don't 404 – the client can handle zero users.
         gid = game_id
         g   = {"config": {}, "users": set()}
     else:
@@ -173,9 +159,9 @@ def round_info(game_id, round_id):
     resp = game_info(game_id)          # reuse the same logic
     data = resp.get_json()
     if data and data.get("games"):
-        data["games"][0]["roundId"] = str(ring_id)  # ensure string
+        data["games"][0]["roundId"] = str(round_id)
         return json_response(data)
-    return resp   # fallback (should never hit)
+    return resp   # fallback (should never happen)
 
 def build_game_session_info(game_id, game_data):
     config = game_data.get("config", {})
@@ -226,7 +212,6 @@ def build_game_session_info(game_id, game_data):
 @app.route("/game/<game_id>/reservation", methods=["POST"])
 def reserve_slots(game_id):
     if game_id not in games:
-        # create a placeholder so subsequent calls don’t 404
         games[game_id] = {"config":{}, "users":set(), "reservations":0, "scores":{}}
     data = request.get_json(silent=True) or {}
     games[game_id]["reservations"] = data.get("count", 0)
@@ -286,7 +271,6 @@ def kick_user(game_id, user_id):
 @app.route("/game/<game_id>/round/<round_id>/participants", methods=["GET"])
 def participants(game_id, round_id):
     if game_id not in games:
-        # Return an empty list – the client can handle it.
         return json_response({"users": []})
     sess = require_auth()
     local_user_id = sess["user_id"]
@@ -426,15 +410,16 @@ def newsfeed_item(item_id):
     for item in newsfeed_items:
         if item["id"] == item_id:
             return json_response(item)
-    # If not found, return a 404 JSON (still valid JSON)
-    return json_response({"error": "not found"}), 404
+    # If not found, still return JSON (404) – Unity will treat it as an error,
+    # but at least it won’t receive an HTML page.
+    return jsonify({"error": "not found"}), 404
 
 # ----------------------------------------------------------------------
 # ANALYTICS
 # ----------------------------------------------------------------------
 @app.route("/analytics/postrace", methods=["POST"])
 def post_race_analytics():
-    _ = request.get_json(silent=True) or {}
+    _ = request.get_json(silent=True) or ()
     return json_response({})
 
 # ----------------------------------------------------------------------
@@ -459,7 +444,7 @@ def leaderboard_post():
 
 @app.route("/leaderboard/advance_time", methods=["POST"])
 def advance_leaderboard_time():
-    _ = request.get_json(silent=True) or {}
+    _ = request.get_json(silent=True) or ()
     return json_response({"entries": [], "total": 0})
 
 # ----------------------------------------------------------------------
