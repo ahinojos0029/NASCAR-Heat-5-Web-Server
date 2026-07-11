@@ -1,3 +1,1 @@
-flask
-uvicorn
-fastapi
+Flask
