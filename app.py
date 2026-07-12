@@ -20,8 +20,12 @@ app = Flask(__name__)
 # ----------------------------------------------------------------------
 def _log(msg: str) -> None:
     """Write a line to stdout and flush so it appears in Railway logs instantly."""
-    print(msg)
-    sys.stdout.flush()
+    try:
+        print(msg)
+        sys.stdout.flush()
+    except Exception:
+        # Ignore logging errors to prevent crashing the app
+        pass
 
 # ----------------------------------------------------------------------
 # In‑memory stores
