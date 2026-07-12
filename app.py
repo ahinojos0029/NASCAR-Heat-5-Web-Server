@@ -116,16 +116,19 @@ def _log_request():
 
 @app.after_request
 def _log_response(response):
-    data = response.get_data()
-    data_preview = (
-        data[:200].decode('utf-8', errors='replace')
-        if data else ''
-    )
-    _log(
-        f"<<< {response.status} {response.status_code}\n"
-        f"Headers: {dict(response.headers)}\n"
-        f"Body ({len(data)} bytes): {data_preview}"
-    )
+    try:
+        data = response.get_data()
+        data_preview = (
+            data[:200].decode('utf-8', errors='replace')
+            if data else ''
+        )
+        _log(
+            f"<<< {response.status} {response.status_code}\n"
+            f"Headers: {dict(response.headers)}\n"
+            f"Body ({len(data)} bytes): {data_preview}"
+        )
+    except Exception as e:
+        _log(f"!!! Error in _log_response: {e}")
     return response
 
 # ----------------------------------------------------------------------
