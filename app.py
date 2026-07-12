@@ -103,16 +103,19 @@ def require_auth():
 # ----------------------------------------------------------------------
 @app.before_request
 def _log_request():
-    body = request.get_data()
-    body_preview = (
-        body[:200].decode('utf-8', errors='replace')
-        if body else ''
-    )
-    _log(
-        f">>> {request.method} {request.path}\n"
-        f"Headers: {dict(request.headers)}\n"
-        f"Body ({len(body)} bytes): {body_preview}"
-    )
+    try:
+        body = request.get_data()
+        body_preview = (
+            body[:200].decode('utf-8', errors='replace')
+            if body else ''
+        )
+        _log(
+            f">>> {request.method} {request.path}\n"
+            f"Headers: {dict(request.headers)}\n"
+            f"Body ({len(body)} bytes): {body_preview}"
+        )
+    except Exception as e:
+        _log(f"!!! Error in _log_request: {e}")
 
 @app.after_request
 def _log_response(response):
@@ -137,8 +140,12 @@ def _log_response(response):
 @app.errorhandler(Exception)
 def handle_all_errors(e):
     _log(f"!!! Unhandled exception: {e}")
-    # Return a 200 response with an error flag so the client can still parse JSON.
-    return json_response({"error": str(e)}), 200
+    try:
+        # Return a 200 response with an error flag so the client can still parse JSON.
+        return json_response({"error": str(e)}), 200
+    except Exception as e2:
+        _log(f"!!! Error in error handler: {e2}")
+        return json_response({"error": "Internal server error"}), 200
 
 # ----------------------------------------------------------------------
 # AUTHENTICATION
@@ -361,18 +368,26 @@ def participants(game_id, round_id):
     user_list = []
     for idx, uid in enumerate(games[game_id]["users"]):
         u = users.get(uid, {})
+        try:
+            sort_val = float(u.get("sortVal", 0.0))
+        except (ValueError, TypeError):
+            sort_val = 0.0
+        try:
+            roll_points = int(u.get("rollingPoints", 0))
+        except (ValueError, TypeError):
+            roll_points = 0
         user_info = {
             "userId": uid,
             "isLocalUser": (uid == local_user_id),
             "mpIdx": idx,
             "name": u.get("name", "Player"),
             "platformUserId": u.get("platformUserId", ""),
-            "sortVal": float(u.get("sortVal", 0.0)),
+            "sortVal": sort_val,
             "isVerified": u.get("isVerified", False),
             "basePersonaId": u.get("basePersonaId", ""),
             "appearanceId": u.get("appearanceId", ""),
             "jingle": u.get("jingle", ""),
-            "rollingPoints": int(u.get("rollingPoints", 0)),
+            "rollingPoints": roll_points,
             "badge": u.get("badge", None)
         }
         user_list.append(user_info)
@@ -401,18 +416,26 @@ def get_user(user_id):
         }
     else:
         u = users[user_id]
+    try:
+        sort_val = float(u.get("sortVal", 0.0))
+    except (ValueError, TypeError):
+        sort_val = 0.0
+    try:
+        roll_points = int(u.get("rollingPoints", 0))
+    except (ValueError, TypeError):
+        roll_points = 0
     resp = {
         "userId": u.get("userId", user_id),
         "isLocalUser": u.get("isLocalUser", False),
         "mpIdx": u.get("mpIdx", 0),
         "name": u.get("name", "Player"),
         "platformUserId": u.get("platformUserId", ""),
-        "sortVal": float(u.get("sortVal", 0.0)),
+        "sortVal": sort_val,
         "isVerified": u.get("isVerified", False),
         "basePersonaId": u.get("basePersonaId", ""),
         "appearanceId": u.get("appearanceId", ""),
         "jingle": u.get("jingle", ""),
-        "rollingPoints": int(u.get("rollingPoints", 0)),
+        "rollingPoints": int(roll_points),  # already int, but safe
         "badge": u.get("badge", None),
     }
     return json_response(resp)
