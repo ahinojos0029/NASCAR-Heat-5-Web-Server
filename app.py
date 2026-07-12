@@ -8,11 +8,10 @@
 # * Reads $PORT from the environment (Railway, localhost, etc.)
 # ----------------------------------------------------------------------
 
-import json
 import os
 import sys
 import uuid
-from flask import Flask, request, jsonify, abort
+from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
@@ -41,8 +40,6 @@ newsfeed_items = [{
     "imageUrl": "",
     "linkUrl": ""
 }]
-tournament_events = []
-tournament_history = []
 challenges = []
 stats_values = {}
 
@@ -280,16 +277,48 @@ def create_game():
 def add_user(game_id):
     """
     Request: JoinRequest (we ignore the content)
-    Response: JoinResponse – the NASCAR client expects a small JSON payload,
-              e.g. {"result": 0} indicating success.
+    Response: JoinResponse – matches the game's expected DTO.
     """
+    _ = request.get_json(silent=True) or {}
     sess = require_auth()                 # always succeeds (creates temp session if needed)
     user_id = sess["user_id"]
     if game_id not in games:
         games[game_id] = {"config":{}, "users":set(), "reservations":0, "scores":{}}
     games[game_id]["users"].add(user_id)
-    # Return a JSON object that the Unity client recognises as a successful join.
-    return json_response({"result": 0})
+
+    # Build a minimal but valid JoinResponse.
+    # The game expects:
+    # {
+    #   "game_id": "<game_id>",
+    #   "backend": {
+    #     "error": null,
+    #     "mpidx": 0,
+    #     "cipher": { iv, aes_key, hmac_key, conn_suffix, conn_message, resp_message: [] or empty strings },
+    #     "isn": { srv_seq: 0, cli_seq: 0 },
+    #     "ip": "127.0.0.1"
+    #   }
+    # }
+    response = {
+        "game_id": game_id,
+        "backend": {
+            "error": None,
+            "mpidx": 0,
+            "cipher": {
+                "iv": "",
+                "aes_key": "",
+                "hmac_key": "",
+                "conn_suffix": "",
+                "conn_message": "",
+                "resp_message": ""
+            },
+            "isn": {
+                "srv_seq": 0,
+                "cli_seq": 0
+            },
+            "ip": "127.0.0.1"
+        }
+    }
+    return json_response(response)
 
 @app.route("/game/<game_id>", methods=["POST"])
 def set_game_info(game_id):
