@@ -98,7 +98,7 @@ def require_auth():
         "appearanceId": "",
         "jingle": "",
         "rollingPoints": 0,
-        "badge": None,
+        "badge": {},
     }
     return sessions[token]
 
@@ -177,7 +177,7 @@ def create_user():
         "appearanceId": "",
         "jingle": "",
         "rollingPoints": 0,
-        "badge": None,
+        "badge": {},
     }
     sessions[token] = {"session_id": session_id, "user_id": user_id}
     return json_response({"session_id": session_id, "mgi_token": token})
@@ -392,7 +392,7 @@ def participants(game_id, round_id):
             "appearanceId": u.get("appearanceId", ""),
             "jingle": u.get("jingle", ""),
             "rollingPoints": roll_points,
-            "badge": u.get("badge", None)
+            "badge": u.get("badge", {})
         }
         user_list.append(user_info)
     return json_response({"users": user_list})
@@ -416,7 +416,7 @@ def get_user(user_id):
             "appearanceId": "",
             "jingle": "",
             "rollingPoints": 0,
-            "badge": None,
+            "badge": {},
         }
     else:
         u = users[user_id]
@@ -440,7 +440,7 @@ def get_user(user_id):
         "appearanceId": u.get("appearanceId", ""),
         "jingle": u.get("jingle", ""),
         "rollingPoints": int(roll_points),  # already int, but safe
-        "badge": u.get("badge", None),
+        "badge": u.get("badge", {}),
     }
     return json_response(resp)
 
@@ -466,7 +466,7 @@ def set_user_info():
             "appearanceId": "",
             "jingle": "",
             "rollingPoints": 0,
-            "badge": None,
+            "badge": {},
         }
         users[user_id].update(cfg)
     return json_response({})
