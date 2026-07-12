@@ -280,15 +280,16 @@ def create_game():
 def add_user(game_id):
     """
     Request: JoinRequest (we ignore the content)
-    Response: JoinResponse (empty JSON)
+    Response: JoinResponse – the NASCAR client expects a small JSON payload,
+              e.g. {"result": 0} indicating success.
     """
-    # Auth now always succeeds (creates a temporary session if needed)
-    sess = require_auth()
+    sess = require_auth()                 # always succeeds (creates temp session if needed)
     user_id = sess["user_id"]
     if game_id not in games:
         games[game_id] = {"config":{}, "users":set(), "reservations":0, "scores":{}}
     games[game_id]["users"].add(user_id)
-    return json_response({})
+    # Return a JSON object that the Unity client recognises as a successful join.
+    return json_response({"result": 0})
 
 @app.route("/game/<game_id>", methods=["POST"])
 def set_game_info(game_id):
