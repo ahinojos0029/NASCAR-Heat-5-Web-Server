@@ -11,9 +11,191 @@
 import os
 import sys
 import uuid
+import random
+import socket
+import threading
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
+
+# ----------------------------------------------------------------------
+# UDP Multiplayer Connection State
+# ----------------------------------------------------------------------
+
+class HeatConnection:
+    def __init__(self, user_id):
+        self.user_id = user_id
+
+        # Connection state
+        self.state = "WAIT_CONNECT"
+
+        # Packet counters
+        self.recv_seq = 0
+        self.send_seq = 0
+
+        # Initial sequence numbers from JoinResponse
+        self.srv_seq = 0
+        self.cli_seq = 0
+
+        # UDP endpoint
+        self.addr = None
+
+        # Last received packet
+        self.last_packet = None
+
+        # Crypto information
+        # Filled during /add_user
+        self.cipher = None
+
+        # Client handshake data
+        # Filled when first UDP packet arrives
+        self.client_iv = None
+        self.client_suffix = None
+        self.client_payload = None
+
+
+udp_connections = {}
+heat_connections = {}
+
+# ----------------------------------------------------------------------
+# UDP Multiplayer Packet Logger
+# ----------------------------------------------------------------------
+
+def udp_logger():
+    global udp_resp
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("0.0.0.0", 7777))
+
+    print("UDP LOGGER STARTED")
+    sys.stdout.flush()
+
+    while True:
+        try:
+            data, addr = sock.recvfrom(4096)
+
+            print("\n========== UDP PACKET ==========")
+            print("FROM:", addr)
+            print("SIZE:", len(data))
+
+
+            # --------------------------------------------------
+            # Find existing Heat connection
+            # --------------------------------------------------
+
+            active_connection = None
+
+            for uid, heat_conn in udp_connections.items():
+
+                if heat_conn.addr == addr:
+                    active_connection = heat_conn
+                    break
+
+
+            # --------------------------------------------------
+            # Assign new UDP packet to waiting connection
+            # --------------------------------------------------
+
+            if active_connection is None:
+
+                for uid, heat_conn in udp_connections.items():
+
+                    if heat_conn.addr is None:
+
+                        heat_conn.addr = addr
+                        heat_conn.state = "CONNECTED"
+
+                        active_connection = heat_conn
+
+                        print("\nASSIGNED UDP CONNECTION")
+                        print("USER:", uid)
+                        print("ADDRESS:", addr)
+
+                        break
+
+            if active_connection:
+
+                active_connection.recv_seq += 1
+                active_connection.last_packet = data
+
+                # Store client handshake values
+                if len(data) >= 112:
+
+                    client_iv = data[:16]
+
+                    client_payload = data[16:80]
+
+                    client_suffix = data[-32:]
+
+                    print("\nCLIENT HANDSHAKE DATA")
+                    print("CLIENT IV:", client_iv.hex())
+                    print("CLIENT SUFFIX:", client_suffix.hex())
+
+                    active_connection.client_iv = client_iv
+                    active_connection.client_suffix = client_suffix
+                    active_connection.client_payload = client_payload
+
+            # --------------------------------------------------
+            # Packet dump
+            # --------------------------------------------------
+
+            print("\nFULL HEX:")
+            print(data.hex())
+
+            print("\nPART 1 - FIRST 16 BYTES (Possible IV):")
+            print(data[:16].hex())
+
+            print("\nPART 2 - MIDDLE DATA (Encrypted Payload):")
+            print(data[16:-32].hex())
+
+            print("\nPART 3 - LAST 32 BYTES (Connection Suffix):")
+            print(data[-32:].hex())
+
+
+            print("\nBYTE LIST:")
+            print(list(data))
+
+
+            # --------------------------------------------------
+            # Send Crypto handshake response
+            # --------------------------------------------------
+
+            print("\nCurrent UDP RESPONSE:")
+
+            if (
+                active_connection is not None
+                and hasattr(active_connection, "udp_response")
+                and active_connection.udp_response is not None
+            ):
+
+                response = active_connection.udp_response
+
+                print(response.hex())
+
+                sock.sendto(
+                    response,
+                    addr
+                )
+
+                active_connection.send_seq += 1
+
+                print("\nSENT RESP_MESSAGE:")
+                print(response.hex())
+
+            else:
+
+                print("None")
+                print("\nNO UDP RESPONSE AVAILABLE")
+
+            print("\n===============================\n")
+
+            sys.stdout.flush()
+
+        except Exception as e:
+
+            print("UDP ERROR:", e)
+            sys.stdout.flush()
 
 # ----------------------------------------------------------------------
 # Simple helper to flush logs immediately (Works with Gunicorn)
@@ -28,12 +210,20 @@ def _log(msg: str) -> None:
         pass
 
 # ----------------------------------------------------------------------
-# In‑memory stores
+# UDP Multiplayer Connection State
 # ----------------------------------------------------------------------
-sessions = {}          # token -> {"session_id": str, "user_id": str}
-users   = {}           # user_id -> dict with user fields
-games   = {}           # game_id -> {"config":{}, "users":set(),
-                       #            "reservations":int, "scores":{}}
+
+# ----------------------------------------------------------------------
+# In-memory stores
+# ----------------------------------------------------------------------
+sessions = {}
+users = {}
+games = {}
+connections = {}
+
+# UDP handshake response (set during add_user)
+udp_resp = None
+
 leaderboards = {}
 newsfeed_items = [{
     "id": 1,
@@ -50,6 +240,14 @@ stats_values = {}
 # ----------------------------------------------------------------------
 # Helper functions
 # ----------------------------------------------------------------------
+
+def make_bytes(size):
+    """
+    Creates random byte arrays for CryptoDLL.StaticConnectionData.
+    """
+    return list(os.urandom(size))
+
+
 def make_token():    return str(uuid.uuid4())
 def make_session_id(): return str(uuid.uuid4())
 def make_user_id():    return str(uuid.uuid4())
@@ -105,21 +303,16 @@ def require_auth():
 # ----------------------------------------------------------------------
 # Request / Response logging (visible in Railway logs)
 # ----------------------------------------------------------------------
+
 @app.before_request
-def _log_request():
-    try:
-        body = request.get_data()
-        body_preview = (
-            body[:200].decode('utf-8', errors='replace')
-            if body else ''
-        )
-        _log(
-            f">>> {request.method} {request.path}\n"
-            f"Headers: {dict(request.headers)}\n"
-            f"Body ({len(body)} bytes): {body_preview}"
-        )
-    except Exception as e:
-        _log(f"!!! Error in _log_request: {e}")
+def log_every_request():
+    print("\n>>>", request.method, request.path)
+
+    if request.args:
+        print("ARGS:", dict(request.args))
+
+    if request.data:
+        print("BODY:", request.data.decode("utf-8"))
 
 @app.after_request
 def _log_response(response):
@@ -289,49 +482,139 @@ def create_game():
 
 @app.route("/game/<game_id>/add_user", methods=["POST"])
 def add_user(game_id):
-    """
-    Request: JoinRequest (we ignore the content)
-    Response: JoinResponse – matches the game's expected DTO.
-    """
-    _ = request.get_json(silent=True) or {}
-    sess = require_auth()                 # always succeeds (creates temp session if needed)
+
+    request_body = request.get_json(silent=True) or {}
+
+    print("\n========== ADD USER ==========")
+    print("Game:", game_id)
+    print("Request:", request_body)
+
+    sess = require_auth()
     user_id = sess["user_id"]
+
     if game_id not in games:
-        games[game_id] = {"config":{}, "users":set(), "reservations":0, "scores":{}}
+        games[game_id] = {
+            "config": {},
+            "users": set(),
+            "reservations": 0,
+            "scores": {}
+        }
+
     games[game_id]["users"].add(user_id)
 
-    # Build a minimal but valid JoinResponse.
-    # The game expects:
-    # {
-    #   "game_id": "<game_id>",
-    #   "backend": {
-    #     "error": null,
-    #     "mpidx": 0,
-    #     "cipher": { iv, aes_key, hmac_key, conn_suffix, conn_message, resp_message: [] or empty strings },
-    #     "isn": { srv_seq: 0, cli_seq: 0 },
-    #     "ip": "127.0.0.1"
-    #   }
-    # }
+    # Assign multiplayer index
+    mpidx = len(games[game_id]["users"]) - 1
+
+
+    # --------------------------------------------------
+    # Generate crypto connection data
+    # --------------------------------------------------
+
+    cipher = {
+        "iv": make_bytes(16),
+        "aes_key": make_bytes(32),
+        "hmac_key": make_bytes(32),
+        "conn_suffix": make_bytes(32),
+        "conn_message": make_bytes(32),
+        "resp_message": make_bytes(64)
+    }
+
+
+    # Initial sequence numbers
+    isn = {
+        "srv_seq": random.randint(10000, 0x7FFFFFFF),
+        "cli_seq": random.randint(10000, 0x7FFFFFFF),
+    }
+
+
+    # HTTP connection information
+    connection = {
+        "game_id": game_id,
+        "user_id": user_id,
+        "mpidx": mpidx,
+        "cipher": cipher,
+        "isn": isn,
+        "ip": "10.0.0.39:7777",
+        "port": 7777
+    }
+
+
+    # --------------------------------------------------
+    # Create UDP connection state
+    # --------------------------------------------------
+
+    conn = HeatConnection(user_id)
+
+    # Store crypto information
+    conn.cipher = cipher
+
+    # Store sequence numbers
+    conn.srv_seq = isn["srv_seq"]
+    conn.cli_seq = isn["cli_seq"]
+
+
+    print("\nHEAT CONNECTION CREATED")
+    print("USER:", conn.user_id)
+    print("SRV SEQ:", conn.srv_seq)
+    print("CLI SEQ:", conn.cli_seq)
+    print("CIPHER STORED:", conn.cipher is not None)
+
+
+    # Store the SAME object everywhere
+    connections[user_id] = connection
+    heat_connections[user_id] = conn
+    udp_connections[user_id] = conn
+
+
+
+    # --------------------------------------------------
+    # Wait for UDP handshake
+    # --------------------------------------------------
+
+    global udp_resp
+
+    udp_resp = None
+
+    print("\nUDP RESPONSE WAITING FOR CLIENT PACKET")
+
+
+
+    print("\nCreated connection:")
+    print(connection)
+
+
+    print("\nHEAT CONNECTION STATE:")
+    print("USER:", conn.user_id)
+    print("STATE:", conn.state)
+    print("SRV SEQ:", conn.srv_seq)
+    print("CLI SEQ:", conn.cli_seq)
+
+
+
     response = {
         "game_id": game_id,
         "backend": {
-            "error": None,
-            "mpidx": 0,
-            "cipher": {
-                "iv": "",
-                "aes_key": "",
-                "hmac_key": "",
-                "conn_suffix": "",
-                "conn_message": "",
-                "resp_message": ""
+            "error": {
+                "sc": 0,
+                "description": "",
+                "error": "",
+                "show": False,
+                "no_mp": False,
+                "log_in_again": False
             },
-            "isn": {
-                "srv_seq": 0,
-                "cli_seq": 0
-            },
-            "ip": "127.0.0.1"
+            "mpidx": mpidx,
+            "cipher": cipher,
+            "isn": isn,
+            "ip": "10.0.0.39:7777"
         }
     }
+
+
+    print("\nSending JoinResponse:")
+    print(response)
+    print("==============================\n")
+
+
     return json_response(response)
 
 @app.route("/game/<game_id>", methods=["POST"])
@@ -344,6 +627,18 @@ def set_game_info(game_id):
 
 @app.route("/game/<game_id>/op/<op>", methods=["POST"])
 def game_op(game_id, op):
+
+    payload = request.get_json(silent=True) or {}
+
+    _log("\n========== GAME OP ==========")
+    _log(f"Game: {game_id}")
+    _log(f"Operation: {op}")
+    _log(f"Payload: {payload}")
+    _log("=============================\n")
+
+    if game_id in games:
+        games[game_id]["last_op"] = op
+
     return json_response({})
 
 @app.route("/game/<game_id>/del_user", methods=["POST"])
@@ -365,21 +660,33 @@ def kick_user(game_id, user_id):
 # ----------------------------------------------------------------------
 @app.route("/game/<game_id>/round/<round_id>/participants", methods=["GET"])
 def participants(game_id, round_id):
+
+    _log("========== PARTICIPANTS REQUEST ==========")
+    _log(f"Game: {game_id}")
+    _log(f"Round: {round_id}")
+    _log("==========================================")
+
     if game_id not in games:
         return json_response({"users": []})
+
     sess = require_auth()
     local_user_id = sess["user_id"]
+
     user_list = []
+
     for idx, uid in enumerate(games[game_id]["users"]):
         u = users.get(uid, {})
+
         try:
             sort_val = float(u.get("sortVal", 0.0))
         except (ValueError, TypeError):
             sort_val = 0.0
+
         try:
             roll_points = int(u.get("rollingPoints", 0))
         except (ValueError, TypeError):
             roll_points = 0
+
         user_info = {
             "userId": uid,
             "isLocalUser": (uid == local_user_id),
@@ -394,9 +701,14 @@ def participants(game_id, round_id):
             "rollingPoints": roll_points,
             "badge": u.get("badge", {})
         }
-        user_list.append(user_info)
-    return json_response({"users": user_list})
 
+        user_list.append(user_info)
+
+    _log(f"Returning {len(user_list)} participants")
+    _log(f"Participants: {user_list}")
+    _log("==========================================")
+
+    return json_response({"users": user_list})
 @app.route("/game/<game_id>/users", methods=["GET"])
 def users_in_game(game_id):
     return participants(game_id, "0")
@@ -600,11 +912,57 @@ def post_challenge_leaderboard(challenge_id):
     return json_response({"entries": []})
 
 # ----------------------------------------------------------------------
+# DEBUG: Catch unknown Heat 5 requests
+# ----------------------------------------------------------------------
+@app.route("/", defaults={"path": ""}, methods=["GET","POST","PUT","DELETE"])
+@app.route("/<path:path>", methods=["GET","POST","PUT","DELETE"])
+def catch_all(path):
+
+    _log("\n========== UNKNOWN REQUEST ==========")
+    _log(f"METHOD: {request.method}")
+    _log(f"PATH: /{path}")
+
+    if request.args:
+        _log(f"ARGS: {dict(request.args)}")
+
+    if request.data:
+        _log(
+            "BODY: " +
+            request.data.decode("utf-8", errors="ignore")
+        )
+
+    _log("====================================\n")
+
+    return json_response({})
+
+@app.errorhandler(404)
+def not_found(e):
+    print("\n!!! UNKNOWN ENDPOINT !!!")
+    print(request.method, request.path)
+    print(request.data.decode("utf-8", errors="ignore"))
+    print("========================\n")
+
+    return "{}", 200
+
+# ----------------------------------------------------------------------
 # RUN – read PORT from the environment (Railway uses $PORT)
 # ----------------------------------------------------------------------
 if __name__ == "__main__":
-    # Local development: `python app.py`
-    # Production (Railway): gunicorn reads the Procfile → gunicorn -b 0.0.0.0:$PORT app:app
+
+    # Start Heat 5 UDP multiplayer listener
+    udp_thread = threading.Thread(
+        target=udp_logger,
+        daemon=True
+    )
+
+    udp_thread.start()
+
     port = int(os.environ.get("PORT", 8000))
-    app.logger.setLevel("INFO")   # keep Flask's own logger for completeness
-    app.run(host="0.0.0.0", port=port, debug=False)
+
+    app.logger.setLevel("INFO")
+
+    app.run(
+        host="0.0.0.0",
+        port=port,
+        debug=False
+    )
