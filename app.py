@@ -848,13 +848,21 @@ def add_user(game_id):
     # Generate crypto connection data
     # --------------------------------------------------
 
+    def make_string(length):
+        # produce random ASCII letters and digits, null-terminated
+        import string
+        chars = string.ascii_letters + string.digits
+        result = ''.join(random.choice(chars) for _ in range(length-1)).encode('ascii')
+        result += b'\x00'
+        return list(result)
+
     cipher = {
         "iv": make_bytes(16),
         "aes_key": make_bytes(32),
         "hmac_key": make_bytes(32),
         "conn_suffix": make_bytes(32),
-        "conn_message": make_bytes(32),
-        "resp_message": make_bytes(32)
+        "conn_message": make_string(32),
+        "resp_message": make_string(32)
     }
 
 
