@@ -219,9 +219,10 @@ class HeatConnection:
 def udp_logger():
     global udp_resp
 
+    udp_port = int(os.environ.get("UDP_PORT", "7777"))
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(("0.0.0.0", 7777))
+    sock.bind(("0.0.0.0", udp_port))
 
     print("UDP LOGGER STARTED")
     sys.stdout.flush()
@@ -865,14 +866,17 @@ def add_user(game_id):
 
 
     # HTTP connection information
+    # Use UDP_HOST environment variable for public IP/hostname, fallback to localhost for development
+    udp_host = os.environ.get("UDP_HOST", "127.0.0.1")
+    udp_port = int(os.environ.get("UDP_PORT", "7777"))
     connection = {
         "game_id": game_id,
         "user_id": user_id,
         "mpidx": mpidx,
         "cipher": cipher,
         "isn": isn,
-        "ip": "10.0.0.39:7777",
-        "port": 7777
+        "ip": f"{udp_host}:{udp_port}",
+        "port": udp_port
     }
 
 
@@ -948,7 +952,7 @@ def add_user(game_id):
             "mpidx": mpidx,
             "cipher": cipher,
             "isn": isn,
-            "ip": "10.0.0.39:7777"
+            "ip": f"{udp_host}:{udp_port}"
         }
     }
 
